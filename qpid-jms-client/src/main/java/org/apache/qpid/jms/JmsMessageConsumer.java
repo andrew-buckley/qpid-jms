@@ -30,6 +30,7 @@ import javax.jms.MessageListener;
 import javax.jms.Session;
 
 import org.apache.qpid.jms.exceptions.JmsExceptionSupport;
+import org.apache.qpid.jms.message.JmsAcknowledgeCallback;
 import org.apache.qpid.jms.message.JmsInboundMessageDispatch;
 import org.apache.qpid.jms.message.JmsMessage;
 import org.apache.qpid.jms.meta.JmsConsumerId;
@@ -324,15 +325,14 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
         lock.lock();
         try {
             if (acknowledgementMode == Session.CLIENT_ACKNOWLEDGE) {
-                envelope.getMessage().setAcknowledgeCallback(new Callable<Void>() {
+                envelope.getMessage().setAcknowledgeCallback(new JmsAcknowledgeCallback() {
                     @Override
-                    public Void call() throws Exception {
+                    public void call(ACK_TYPE ackType) throws JMSException {
                         if (session.isClosed()) {
                             throw new javax.jms.IllegalStateException("Session closed.");
                         }
-                        session.acknowledge();
+                        session.acknowledge(ackType);
                         envelope.getMessage().setAcknowledgeCallback(null);
-                        return null;
                     }
                 });
             }

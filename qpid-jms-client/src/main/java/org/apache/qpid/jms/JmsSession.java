@@ -757,12 +757,12 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
      *
      * @throws JMSException if an error occurs while the acknowledge is processed.
      */
-    void acknowledge() throws JMSException {
+    void acknowledge(ACK_TYPE ackType) throws JMSException {
         if (isTransacted()) {
             throw new IllegalStateException("Session acknowledge called inside a transacted Session");
         }
 
-        this.connection.acknowledge(sessionInfo.getSessionId());
+        this.connection.acknowledge(sessionInfo.getSessionId(), ackType);
     }
 
     public boolean isClosed() {

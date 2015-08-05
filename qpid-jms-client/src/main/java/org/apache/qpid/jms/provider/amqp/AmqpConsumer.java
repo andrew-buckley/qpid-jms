@@ -263,11 +263,29 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
      * Only messages that have already been acknowledged as delivered by the JMS
      * framework will be in the delivered Map.  This means that the link credit
      * would already have been given for these so we just need to settle them.
+     *
+     * @param ackType the acknowledgement type.
      */
-    public void acknowledge() {
+    public void acknowledge(ACK_TYPE ackType) {
         LOG.trace("Session Acknowledge for consumer: {}", resource.getConsumerId());
         for (Delivery delivery : delivered.values()) {
-            delivery.disposition(Accepted.getInstance());
+            switch (ackType)
+            {
+                case CONSUMED:
+                    delivery.disposition(Accepted.getInstance());
+                    break;
+                case POISONED:
+                    deliveryFailed(delivery);
+                    break;
+                case RELEASED:
+                    delivery.disposition(Released.getInstance());
+                    break;
+                default:
+                    throw new IllegalArgumentException(
+                            "Invalid acknowledgement type. "
+                                    + "Valid acknowledgement types are "
+                                    + "CONSUMED, POISONED, and RELEASED.");
+            }
             delivery.settle();
         }
         delivered.clear();

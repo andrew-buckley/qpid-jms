@@ -696,13 +696,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
         }
     }
 
-    void acknowledge(JmsSessionId sessionId) throws JMSException {
+    void acknowledge(JmsSessionId sessionId, ACK_TYPE ackType) throws JMSException {
         checkClosedOrFailed();
         connect();
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.acknowledge(sessionId, request);
+            provider.acknowledge(sessionId, ackType, request);
             request.sync();
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);

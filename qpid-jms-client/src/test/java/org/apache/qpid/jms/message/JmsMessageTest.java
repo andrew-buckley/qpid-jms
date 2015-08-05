@@ -38,6 +38,7 @@ import org.apache.qpid.jms.JmsTopic;
 import org.apache.qpid.jms.message.facade.JmsMessageFacade;
 import org.apache.qpid.jms.message.facade.test.JmsTestMessageFacade;
 import org.apache.qpid.jms.message.facade.test.JmsTestMessageFactory;
+import org.apache.qpid.jms.provider.ProviderConstants;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -1141,18 +1142,19 @@ public class JmsMessageTest {
     @SuppressWarnings("unchecked")
     @Test
     public void testAcknowledgeWitCallback() throws Exception {
-        Callable<Void> callback = Mockito.mock(Callable.class);
+        JmsAcknowledgeCallback callback = Mockito.mock(JmsAcknowledgeCallback.class);
         JmsMessage msg = factory.createMessage();
         msg.setAcknowledgeCallback(callback);
         msg.acknowledge();
-        Mockito.verify(callback).call();
+        Mockito.verify(callback).call(ProviderConstants.ACK_TYPE.CONSUMED);
     }
 
     @SuppressWarnings("unchecked")
     @Test
     public void testAcknowledgeWitCallbackThatThrows() throws Exception {
-        Callable<Void> callback = Mockito.mock(Callable.class);
-        Mockito.doThrow(new Exception()).when(callback).call();
+        JmsAcknowledgeCallback callback = Mockito.mock(JmsAcknowledgeCallback.class);
+        Mockito.doThrow(new JMSException("", "")).when(callback).call(
+                ProviderConstants.ACK_TYPE.CONSUMED);
         JmsMessage msg = factory.createMessage();
         msg.setAcknowledgeCallback(callback);
         assertEquals(callback, msg.getAcknowledgeCallback());

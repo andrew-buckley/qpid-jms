@@ -192,13 +192,14 @@ public interface Provider {
      *
      * @param sessionId
      *        the ID of the Session whose delivered messages should be acknowledged.
+     * @param ackType the acknowledgement type.
      * @param request
      *        The request object that should be signaled when this operation completes.
      *
      * @throws IOException if an error occurs or the Provider is already closed.
      * @throws JMSException if an error occurs due to JMS violation such as unmatched ack.
      */
-    void acknowledge(JmsSessionId sessionId, AsyncResult request) throws IOException, JMSException;
+    void acknowledge(JmsSessionId sessionId, ACK_TYPE ackType, AsyncResult request) throws IOException, JMSException;
 
     /**
      * Called to acknowledge a JmsMessage has been delivered, consumed, re-delivered...etc.

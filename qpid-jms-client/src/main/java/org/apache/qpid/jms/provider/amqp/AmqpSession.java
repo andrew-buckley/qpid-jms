@@ -29,6 +29,7 @@ import org.apache.qpid.jms.meta.JmsSessionId;
 import org.apache.qpid.jms.meta.JmsSessionInfo;
 import org.apache.qpid.jms.meta.JmsTransactionId;
 import org.apache.qpid.jms.provider.AsyncResult;
+import org.apache.qpid.jms.provider.ProviderConstants;
 import org.apache.qpid.proton.engine.Session;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -87,10 +88,12 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
     /**
      * Perform an acknowledge of all delivered messages for all consumers active in this
      * Session.
+     *
+     * @param ackType the acknowledgement type.
      */
-    public void acknowledge() {
+    public void acknowledge(ProviderConstants.ACK_TYPE ackType) {
         for (AmqpConsumer consumer : consumers.values()) {
-            consumer.acknowledge();
+            consumer.acknowledge(ackType);
         }
     }
 
