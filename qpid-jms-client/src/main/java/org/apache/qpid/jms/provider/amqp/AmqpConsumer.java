@@ -275,7 +275,7 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
                     delivery.disposition(Accepted.getInstance());
                     break;
                 case POISONED:
-                    deliveryFailed(delivery);
+                    delivery.disposition(new Rejected());
                     break;
                 case RELEASED:
                     delivery.disposition(Released.getInstance());

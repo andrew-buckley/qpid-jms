@@ -132,6 +132,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         this.provider = provider;
         this.provider.setProviderListener(this);
+
         try {
             this.provider.start();
         } catch (Exception e) {
