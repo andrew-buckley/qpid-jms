@@ -3,12 +3,12 @@
 This is a fork of the QpidJMS project that adds the ability to acknowledge
 messages in three ways: CONSUMED, POISONED, and RELEASED.
 The fork is based on QpidJMS version 0.4.0-SNAPSHOT. The fork is
-fully compatible with JMS 1.1 but provides an additional interface, JmsAmqpsMessage
+fully compatible with JMS 1.1 but provides an additional interface, JmsAmqpMessage
 (found in org.apache.qpid.jms), that features this new functionality.
-Any messages consumed using this provider can be safely cast to type JmsAmpqsMessage.
+Any messages consumed using this provider can be safely cast to type JmsAmpqMessage.
 
 ## Additions
-* org.apache.qpid.jms.message.JmsAmqpsMessage
+* org.apache.qpid.jms.message.JmsAmqpMessage
 * org.apache.qpid.jms.message.JmsAcknowledgeCallback
 
 ## Changes

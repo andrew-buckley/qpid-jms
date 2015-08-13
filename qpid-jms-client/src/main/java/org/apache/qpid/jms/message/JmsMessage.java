@@ -20,7 +20,6 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.Callable;
 
 import javax.jms.DeliveryMode;
 import javax.jms.Destination;
@@ -35,7 +34,8 @@ import org.apache.qpid.jms.message.facade.JmsMessageFacade;
 import org.apache.qpid.jms.provider.ProviderConstants;
 import org.apache.qpid.jms.util.TypeConversionSupport;
 
-public class JmsMessage implements JmsAmqpsMessage {
+public class JmsMessage implements JmsAmqpMessage
+{
 
     private static final String ID_PREFIX = "ID:";
     protected transient JmsAcknowledgeCallback acknowledgeCallback;
