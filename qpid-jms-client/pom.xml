@@ -23,7 +23,7 @@
     <version>0.4.0-SNAPSHOT</version>
   </parent>
 
-  <artifactId>qpid-jms-client-amqp-ack</artifactId>
+  <artifactId>qpid-jms-client</artifactId>
   <packaging>jar</packaging>
   <name>QpidJMS Client with AMQP acknowledgement</name>
   <description>The core JMS Client implementation with support for AMQP-style acknowledgement.</description>
