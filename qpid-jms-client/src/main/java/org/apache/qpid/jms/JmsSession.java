@@ -765,7 +765,7 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
             throw new IllegalStateException("Session acknowledge called inside a transacted Session");
         }
 
-        this.connection.acknowledge(sessionInfo.getSessionId(), ackType);
+        this.connection.acknowledge(sessionInfo.getId(), ackType);
     }
 
     public boolean isClosed() {
