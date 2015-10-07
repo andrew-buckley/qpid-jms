@@ -16,6 +16,10 @@
  */
 package org.apache.qpid.jms.meta;
 
+import java.net.URI;
+
+import org.apache.qpid.jms.JmsPrefetchPolicy;
+import org.apache.qpid.jms.JmsRedeliveryPolicy;
 import org.apache.qpid.jms.util.ToStringSupport;
 
 /**
@@ -31,18 +35,29 @@ public final class JmsConnectionInfo implements JmsResource, Comparable<JmsConne
     public static final long DEFAULT_REQUEST_TIMEOUT = INFINITE;
 
     private final JmsConnectionId connectionId;
+
+    private URI configuredURI;
+    private URI connectedURI;
     private String clientId;
     private String username;
     private String password;
     private boolean forceAsyncSend;
     private boolean alwaysSyncSend;
-    public long sendTimeout = DEFAULT_SEND_TIMEOUT;
-    public long requestTimeout = DEFAULT_REQUEST_TIMEOUT;
-    public long connectTimeout = DEFAULT_CONNECT_TIMEOUT;
-    public long closeTimeout = DEFAULT_CLOSE_TIMEOUT;
+    private boolean validatePropertyNames = true;
+    private boolean receiveLocalOnly;
+    private boolean receiveNoWaitLocalOnly;
+    private boolean localMessagePriority;
+    private boolean localMessageExpiry;
+    private boolean sendAcksAsync;
+    private long sendTimeout = DEFAULT_SEND_TIMEOUT;
+    private long requestTimeout = DEFAULT_REQUEST_TIMEOUT;
+    private long connectTimeout = DEFAULT_CONNECT_TIMEOUT;
+    private long closeTimeout = DEFAULT_CLOSE_TIMEOUT;
     private String queuePrefix = null;
     private String topicPrefix = null;
-    private boolean validatePropertyNames = true;
+
+    private JmsPrefetchPolicy prefetchPolicy = new JmsPrefetchPolicy();
+    private JmsRedeliveryPolicy redeliveryPolicy = new JmsRedeliveryPolicy();
 
     public JmsConnectionInfo(JmsConnectionId connectionId) {
         if (connectionId == null) {
@@ -89,8 +104,25 @@ public final class JmsConnectionInfo implements JmsResource, Comparable<JmsConne
         this.alwaysSyncSend = alwaysSyncSend;
     }
 
-    public JmsConnectionId getConnectionId() {
+    @Override
+    public JmsConnectionId getId() {
         return connectionId;
+    }
+
+    public URI getConfiguredURI() {
+        return configuredURI;
+    }
+
+    public void setConfiguredURI(URI uri) {
+        configuredURI = uri;
+    }
+
+    public URI getConnectedURI() {
+        return connectedURI;
+    }
+
+    public void setConnectedURI(URI connectedURI) {
+        this.connectedURI = connectedURI;
     }
 
     public String getClientId() {
@@ -171,6 +203,62 @@ public final class JmsConnectionInfo implements JmsResource, Comparable<JmsConne
 
     public void setRequestTimeout(long requestTimeout) {
         this.requestTimeout = requestTimeout;
+    }
+
+    public boolean isLocalMessagePriority() {
+        return localMessagePriority;
+    }
+
+    public void setLocalMessagePriority(boolean localMessagePriority) {
+        this.localMessagePriority = localMessagePriority;
+    }
+
+    public boolean isSendAcksAsync() {
+        return sendAcksAsync;
+    }
+
+    public void setSendAcksAsync(boolean sendAcksAsync) {
+        this.sendAcksAsync = sendAcksAsync;
+    }
+
+    public boolean isReceiveLocalOnly() {
+        return receiveLocalOnly;
+    }
+
+    public void setReceiveLocalOnly(boolean receiveLocalOnly) {
+        this.receiveLocalOnly = receiveLocalOnly;
+    }
+
+    public boolean isReceiveNoWaitLocalOnly() {
+        return receiveNoWaitLocalOnly;
+    }
+
+    public void setReceiveNoWaitLocalOnly(boolean receiveNoWaitLocalOnly) {
+        this.receiveNoWaitLocalOnly = receiveNoWaitLocalOnly;
+    }
+
+    public boolean isLocalMessageExpiry() {
+        return localMessageExpiry;
+    }
+
+    public void setLocalMessageExpiry(boolean localMessageExpiry) {
+        this.localMessageExpiry = localMessageExpiry;
+    }
+
+    public JmsPrefetchPolicy getPrefetchPolicy() {
+        return prefetchPolicy;
+    }
+
+    public void setPrefetchPolicy(JmsPrefetchPolicy prefetchPolicy) {
+        this.prefetchPolicy = prefetchPolicy.copy();
+    }
+
+    public JmsRedeliveryPolicy getRedeliveryPolicy() {
+        return redeliveryPolicy;
+    }
+
+    public void setRedeliveryPolicy(JmsRedeliveryPolicy redeliveryPolicy) {
+        this.redeliveryPolicy = redeliveryPolicy.copy();
     }
 
     @Override

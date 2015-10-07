@@ -277,6 +277,85 @@ public class FifoMessageQueueTest {
         assertSame(message, queue.dequeue(-1));
     }
 
+    @Test(timeout = 10000)
+    public void testDequeueWaitsUntilMessageArrivesWhenLockNotified() throws InterruptedException {
+        doDequeueWaitsUntilMessageArrivesWhenLockNotifiedTestImpl(-1);
+    }
+
+    @Test(timeout = 10000)
+    public void testTimedDequeueWaitsUntilMessageArrivesWhenLockNotified() throws InterruptedException {
+        doDequeueWaitsUntilMessageArrivesWhenLockNotifiedTestImpl(100000);
+    }
+
+    private void doDequeueWaitsUntilMessageArrivesWhenLockNotifiedTestImpl(int timeout) throws InterruptedException {
+        final JmsInboundMessageDispatch message = createEnvelope();
+        Thread runner = new Thread(new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(100);
+                } catch (InterruptedException e) {
+                }
+                synchronized (queue.getLock()) {
+                    queue.getLock().notify();
+                }
+                try {
+                    TimeUnit.MILLISECONDS.sleep(100);
+                } catch (InterruptedException e) {
+                }
+                queue.enqueueFirst(message);
+            }
+        });
+        runner.start();
+
+        assertSame(message, queue.dequeue(timeout));
+    }
+
+    @Test(timeout = 10000)
+    public void testDequeueReturnsWhenQueueIsStopped() throws InterruptedException {
+        Thread runner = new Thread(new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(100);
+                } catch (InterruptedException e) {
+                }
+                queue.stop();
+            }
+        });
+        runner.start();
+
+        assertNull(queue.dequeue(-1));
+    }
+
+    @Test
+    public void testRestartingClosedQueueHasNoEffect() throws InterruptedException {
+        JmsInboundMessageDispatch message = createEnvelope();
+        queue.enqueueFirst(message);
+
+        assertTrue(queue.isRunning());
+        assertFalse(queue.isClosed());
+
+        queue.stop();
+
+        assertFalse(queue.isRunning());
+        assertFalse(queue.isClosed());
+        assertNull(queue.dequeue(1L));
+
+        queue.close();
+
+        assertTrue(queue.isClosed());
+        assertFalse(queue.isRunning());
+
+        queue.start();
+
+        assertTrue(queue.isClosed());
+        assertFalse(queue.isRunning());
+        assertNull(queue.dequeue(1L));
+    }
+
     private List<JmsInboundMessageDispatch> createFullRangePrioritySet() {
         List<JmsInboundMessageDispatch> messages = new ArrayList<JmsInboundMessageDispatch>();
         for (int i = 0; i < 10; ++i) {

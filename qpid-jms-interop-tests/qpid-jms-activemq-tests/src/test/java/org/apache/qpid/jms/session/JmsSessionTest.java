@@ -19,11 +19,9 @@ package org.apache.qpid.jms.session;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import java.util.concurrent.TimeUnit;
 
-import javax.jms.JMSSecurityException;
 import javax.jms.MessageConsumer;
 import javax.jms.MessageProducer;
 import javax.jms.Queue;
@@ -35,7 +33,6 @@ import javax.jms.Topic;
 import org.apache.activemq.broker.jmx.BrokerViewMBean;
 import org.apache.qpid.jms.support.AmqpTestSupport;
 import org.apache.qpid.jms.support.Wait;
-import org.junit.Ignore;
 import org.junit.Test;
 
 /**
@@ -84,47 +81,6 @@ public class JmsSessionTest extends AmqpTestSupport {
     }
 
     @Test(timeout=30000)
-    public void testSessionDoubleCloseWithoutException() throws Exception {
-        connection = createAmqpConnection();
-        connection.start();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        session.close();
-        session.close();
-    }
-
-    @Test(timeout=30000)
-    public void testConsumerCreateThrowsWhenBrokerStops() throws Exception {
-        connection = createAmqpConnection();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue(getDestinationName());
-        connection.start();
-
-        stopPrimaryBroker();
-        try {
-            session.createConsumer(queue);
-            fail("Should have thrown an IllegalStateException");
-        } catch (Exception ex) {
-            LOG.info("Caught exception on create consumer: {}", ex);
-        }
-    }
-
-    @Test(timeout=30000)
-    public void testProducerCreateThrowsWhenBrokerStops() throws Exception {
-        connection = createAmqpConnection();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue(getDestinationName());
-        connection.start();
-
-        stopPrimaryBroker();
-        try {
-            session.createProducer(queue);
-            fail("Should have thrown an IllegalStateException");
-        } catch (Exception ex) {
-            LOG.info("Caught exception on create producer: {}", ex);
-        }
-    }
-
-    @Test(timeout=30000)
     public void testCreateTemporaryQueue() throws Exception {
         connection = createAmqpConnection();
         Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
@@ -136,17 +92,6 @@ public class JmsSessionTest extends AmqpTestSupport {
         assertEquals(1, broker.getTemporaryQueues().length);
     }
 
-    @Test(timeout=30000)
-    public void testCreateTemporaryQueueNotAuthorized() throws Exception {
-        connection = createAmqpConnection("guest", "password");
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        try {
-            session.createTemporaryQueue();
-            fail("Should have thrown a security exception");
-        } catch (JMSSecurityException jmsse) {}
-    }
-
-    @Ignore("Delete of Temporary destinations not yet supported.")
     @Test(timeout=30000)
     public void testDeleteTemporaryQueue() throws Exception {
         connection = createAmqpConnection();
@@ -170,7 +115,6 @@ public class JmsSessionTest extends AmqpTestSupport {
         }, TimeUnit.SECONDS.toMillis(30), TimeUnit.MILLISECONDS.toMillis(50)));
     }
 
-    @Ignore("Temporary Topics not supported in AMQ yet.")
     @Test(timeout=30000)
     public void testCreateTemporaryTopic() throws Exception {
         connection = createAmqpConnection();
@@ -183,18 +127,6 @@ public class JmsSessionTest extends AmqpTestSupport {
         assertEquals(1, broker.getTemporaryTopics().length);
     }
 
-    @Ignore("Temporary Topics not supported in AMQ yet.")
-    @Test(timeout=30000)
-    public void testCreateTemporaryTopicNotAuthorized() throws Exception {
-        connection = createAmqpConnection("guest", "password");
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        try {
-            session.createTemporaryTopic();
-            fail("Should have thrown a security exception");
-        } catch (JMSSecurityException jmsse) {}
-    }
-
-    @Ignore("Temporary Topics not supported in AMQ yet.")
     @Test(timeout=30000)
     public void testDeleteTemporaryTopic() throws Exception {
         connection = createAmqpConnection();

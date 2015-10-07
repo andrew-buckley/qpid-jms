@@ -79,14 +79,18 @@ The options apply to the behaviour of the JMS objects such as Connection, Sessio
 + **jms.forceAsyncSend** Configures whether all Messages sent from a MessageProducer are sent asynchronously or only those Message that qualify such as Messages inside a transaction or non-persistent messages.
 + **jms.alwaysSyncSend** Override all asynchronous send conditions and always sends every Message from a MessageProducer synchronously.
 + **jms.sendAcksAsync** Causes all Message acknowledgments to be sent asynchronously.
-+ **jms.localMessagePriority** If enabled prefetched messages are reordered locally based on their given Message priority value.
++ **jms.localMessageExpiry** Controls whether MessageConsumer instances will locally filter expired Messages or deliver them.  By default this value is set to true and expired messages will be filtered.
++ **jms.localMessagePriority** If enabled prefetched messages are reordered locally based on their given Message priority value. Default is false.
 + **jms.validatePropertyNames** If message property names should be validated as valid Java identifiers. Default is true.
++ **jms.receiveLocalOnly** If enabled receive calls with a timeout will only check a consumers local message buffer, otherwise the remote peer is checked to ensure there are really no messages available if the local timeout expires before a message arrives. Default is false, the remote is checked.
++ **jms.receiveNoWaitLocalOnly** If enabled receiveNoWait calls will only check a consumers local message buffer, otherwise the remote peer is checked to ensure there are really no messages available. Default is false, the remote is checked.
 + **jms.queuePrefix** Optional prefix value added to the name of any Queue created from a JMS Session.
 + **jms.topicPrefix** Optional prefix value added to the name of any Topic created from a JMS Session.
 + **jms.closeTimeout** Timeout value that controls how long the client waits on Connection close before returning. (By default the client waits 15 seconds for a normal close completion event).
 + **jms.connectTimeout** Timeout value that controls how long the client waits on Connection establishment before returning with an error. (By default the client waits 15 seconds for a connection to be established before failing).
 + **jms.clientIDPrefix** Optional prefix value that is used for generated Client ID values when a new Connection is created for the JMS ConnectionFactory.  The default prefix is 'ID:'.
 + **jms.connectionIDPrefix** Optional prefix value that is used for generated Connection ID values when a new Connection is created for the JMS ConnectionFactory.  This connection ID is used when logging some information from the JMS Connection object so a configurable prefix can make breadcrumbing the logs easier.  The default prefix is 'ID:'.
++ **jms.messageIDType** Controls the type of the Message ID assigned to messages sent from the client.  By default a generated String value is used on outgoing messages, other available types are UUID and UUID_STRING.
 
 These values control how many messages the remote peer can send to the client and be held in a prefetch buffer for each consumer instance.
 
@@ -141,13 +145,27 @@ The complete set of SSL Transport options is listed below:
 + **transport.verifyHost** Whether to verify that the hostname being connected to matches with the provided server certificate. Defaults to true.
 + **transport.keyAlias** The alias to use when selecting a keypair from the keystore if required to send a client certificate to the server. No default.
 
+### AMQP Configuration options
+
+These options apply to the behaviour of certain AMQP functionality.
+
++ **amqp.idleTimeout** The idle timeout in milliseconds after which the connection will be failed if the peer sends no AMQP frames. Default is 60000.
++ **amqp.vhost** The vhost to connect to. Used to populate the Sasl and Open hostname fields. Default is the main hostname from the Connection URI.
++ **amqp.saslLayer** Controls whether connections should use a SASL layer or not. Default is true.
++ **amqp.saslMechanisms** Which SASL mechanism(s) the client should allow selection of, if offered by the server and usable with the configured credentials. Comma separated if specifying more than 1 mechanism. Default is to allow selection from all the clients supported mechanisms, which are currently EXTERNAL, CRAM-MD5, PLAIN, and ANONYMOUS.
++ **amqp.maxFrameSize** The max-frame-size value in bytes that is advertised to the peer. Default is 1048576.
+
 ### Failover Configuration options
 
-With failover enabled the client can reconnect to a different broker automatically when the connection to the current connection is lost for some reason.  The failover URI is always initiated with the *failover* prefix and a list of URIs for the brokers is contained inside a set of parenthesis.
+With failover enabled the client can reconnect to a different broker automatically when the connection to the current connection is lost for some reason.  The failover URI is always initiated with the *failover* prefix and a list of URIs for the brokers is contained inside a set of parentheses. The "jms." options are applied to the overall failover URI, outside the parentheses, and affect the JMS Connection object for its lifetime.
 
 The URI for failover looks something like the following:
 
-    failover:(amqp://broker1:5672,amqp://broker2:5672)?failover.maxReconnectAttempts=20
+    failover:(amqp://host1:5672,amqp://host2:5672)?jms.clientID=foo&failover.maxReconnectAttempts=20
+
+The individual broker details within the parentheses can use the "transport." or "amqp." options defined earlier, with these being applied as each host is connected to:
+
+    failover:(amqp://host1:5672?amqp.option=value,amqp://host2:5672?transport.option=value)?jms.clientID=foo
 
 The complete set of configuration options for failover is listed below:
 
@@ -160,19 +178,10 @@ The complete set of configuration options for failover is listed below:
 + **failover.startupMaxReconnectAttempts** For a client that has never connected to a remote peer before this option control how many attempts are made to connect before reporting the connection as failed.  The default is to use the value of maxReconnectAttempts.
 + **failover.warnAfterReconnectAttempts** Controls how often the client will log a message indicating that failover reconnection is being attempted.  The default is to log every 10 connection attempts.
 
-The failover URI also supports defining 'nested' options. These provide means of specifying global option values applicable to all the individual nested broker URI's, which can be useful to avoid repetition. This is accomplished using the same URI options outlined earlier for the individual broker URI but prefixed with *failover.nested.*. For example, to apply a value for the *jms.clientID* option to every broker URI you could specify:
+The failover URI also supports defining 'nested' options as a means of specifying AMQP and transport option values applicable to all the individual nested broker URI's, which can be useful to avoid repetition. This is accomplished using the same "transport." and "amqp." URI options outlined earlier for a non-failover broker URI but prefixed with *failover.nested.*. For example, to apply the same value for the *amqp.vhost* option to every broker connected to you might have a URI like:
 
-    failover:(amqp://broker1:5672,amqp://broker2:5672)?failover.nested.jms.clientID=foo
+    failover:(amqp://host1:5672,amqp://host2:5672)?jms.clientID=foo&failover.nested.amqp.vhost=myhost
 
-
-### AMQP Configuration options
-
-These options apply to the behaviour of certain AMQP functionality.
-
-+ **amqp.idleTimeout** The idle timeout in milliseconds after which the connection will be failed if the peer sends no AMQP frames. Default is 60000.
-+ **amqp.vhost** The vhost to connect to. Used to populate the Sasl and Open hostname fields. Default is the main hostname from the Connection URI.
-+ **amqp.saslLayer** Controls whether connections should use a SASL layer or not. Default is true.
-+ **amqp.saslMechanisms** Which SASL mechanism(s) the client should allow selection of, if offered by the server and usable with the configured credentials. Comma separated if specifying more than 1 mechanism. Default is to allow selection from all the clients supported mechanisms, which are currently EXTERNAL, CRAM-MD5, PLAIN, and ANONYMOUS.
 
 
 ### Discovery Configuration options

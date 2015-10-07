@@ -26,7 +26,6 @@ import javax.jms.Message;
 import javax.jms.Queue;
 import javax.jms.QueueBrowser;
 
-import org.apache.qpid.jms.message.JmsInboundMessageDispatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,11 +62,9 @@ public class JmsQueueBrowser implements QueueBrowser, Enumeration<Message> {
     private final String selector;
 
     private JmsMessageConsumer consumer;
-    private final AtomicBoolean browseDone = new AtomicBoolean(false);
 
     private Message next;
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final Object semaphore = new Object();
 
     /**
      * Constructor for an JmsQueueBrowser - used internally
@@ -145,12 +142,10 @@ public class JmsQueueBrowser implements QueueBrowser, Enumeration<Message> {
                 return true;
             }
 
-            if (browseDone.get() || !session.isStarted()) {
+            if (next == null || !session.isStarted()) {
                 destroyConsumer();
                 return false;
             }
-
-            waitForMessage();
         }
     }
 
@@ -173,7 +168,7 @@ public class JmsQueueBrowser implements QueueBrowser, Enumeration<Message> {
             return message;
         }
 
-        if (browseDone.get() || !session.isStarted()) {
+        if (!session.isStarted()) {
             destroyConsumer();
             return null;
         }
@@ -184,7 +179,6 @@ public class JmsQueueBrowser implements QueueBrowser, Enumeration<Message> {
     @Override
     public void close() throws JMSException {
         if (closed.compareAndSet(false, true)) {
-            browseDone.set(true);
             destroyConsumer();
         }
     }
@@ -208,25 +202,6 @@ public class JmsQueueBrowser implements QueueBrowser, Enumeration<Message> {
         return selector;
     }
 
-    /**
-     * Wait on a semaphore for a fixed amount of time for a message to come in.
-     */
-    protected void waitForMessage() {
-        try {
-            synchronized (semaphore) {
-                semaphore.wait(2000);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    protected void notifyMessageAvailable() {
-        synchronized (semaphore) {
-            semaphore.notifyAll();
-        }
-    }
-
     @Override
     public String toString() {
         JmsMessageConsumer consumer = this.consumer;
@@ -234,22 +209,11 @@ public class JmsQueueBrowser implements QueueBrowser, Enumeration<Message> {
     }
 
     private JmsMessageConsumer createConsumer() throws JMSException {
-        browseDone.set(false);
         JmsMessageConsumer rc = new JmsMessageConsumer(session.getNextConsumerId(), session, destination, selector, false) {
 
             @Override
             public boolean isBrowser() {
                 return true;
-            }
-
-            @Override
-            public void onInboundMessage(JmsInboundMessageDispatch envelope) {
-                if (envelope.getMessage() == null) {
-                    browseDone.set(true);
-                } else {
-                    super.onInboundMessage(envelope);
-                }
-                notifyMessageAvailable();
             }
         };
         rc.init();

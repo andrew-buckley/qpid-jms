@@ -28,22 +28,35 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
+import java.io.IOException;
 import java.util.Date;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import javax.jms.Connection;
 import javax.jms.DeliveryMode;
+import javax.jms.ExceptionListener;
 import javax.jms.IllegalStateException;
+import javax.jms.JMSException;
 import javax.jms.Message;
 import javax.jms.MessageProducer;
 import javax.jms.Queue;
 import javax.jms.Session;
 
+import org.apache.qpid.jms.JmsConnection;
+import org.apache.qpid.jms.JmsConnectionFactory;
 import org.apache.qpid.jms.provider.amqp.message.AmqpMessageSupport;
 import org.apache.qpid.jms.test.QpidJmsTestCase;
 import org.apache.qpid.jms.test.Wait;
+import org.apache.qpid.jms.test.testpeer.ListDescribedType;
 import org.apache.qpid.jms.test.testpeer.TestAmqpPeer;
 import org.apache.qpid.jms.test.testpeer.basictypes.AmqpError;
+import org.apache.qpid.jms.test.testpeer.describedtypes.Modified;
+import org.apache.qpid.jms.test.testpeer.describedtypes.Rejected;
+import org.apache.qpid.jms.test.testpeer.describedtypes.Released;
 import org.apache.qpid.jms.test.testpeer.matchers.sections.MessageAnnotationsSectionMatcher;
 import org.apache.qpid.jms.test.testpeer.matchers.sections.MessageHeaderSectionMatcher;
 import org.apache.qpid.jms.test.testpeer.matchers.sections.MessagePropertiesSectionMatcher;
@@ -53,8 +66,13 @@ import org.apache.qpid.proton.amqp.UnsignedByte;
 import org.apache.qpid.proton.amqp.UnsignedInteger;
 import org.hamcrest.Matcher;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ProducerIntegrationTest extends QpidJmsTestCase {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ProducerIntegrationTest.class);
+
     private final IntegrationTestFixture testFixture = new IntegrationTestFixture();
 
     @Test(timeout = 20000)
@@ -479,6 +497,106 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
         }
     }
 
+    @Test(timeout=20000)
+    public void testSendingMessageWithUUIDStringMessageFormat() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            // DONT create a test fixture, we will drive everything directly.
+            String uri = "amqp://127.0.0.1:" + testPeer.getServerPort() + "?jms.messageIDType=UUID_STRING";
+            JmsConnectionFactory factory = new JmsConnectionFactory(uri);
+
+            Connection connection = factory.createConnection();
+            testPeer.expectSaslAnonymousConnect();
+            testPeer.expectBegin();
+
+            testPeer.expectBegin();
+            testPeer.expectSenderAttach();
+
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            String queueName = "myQueue";
+            Queue queue = session.createQueue(queueName);
+            MessageProducer producer = session.createProducer(queue);
+
+            String text = "myMessage";
+            MessageHeaderSectionMatcher headersMatcher = new MessageHeaderSectionMatcher(true).withDurable(equalTo(true));
+            MessageAnnotationsSectionMatcher msgAnnotationsMatcher = new MessageAnnotationsSectionMatcher(true);
+            MessagePropertiesSectionMatcher propsMatcher = new MessagePropertiesSectionMatcher(true).withMessageId(isA(String.class));
+            TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
+            messageMatcher.setHeadersMatcher(headersMatcher);
+            messageMatcher.setMessageAnnotationsMatcher(msgAnnotationsMatcher);
+            messageMatcher.setPropertiesMatcher(propsMatcher);
+            messageMatcher.setMessageContentMatcher(new EncodedAmqpValueMatcher(text));
+            testPeer.expectTransfer(messageMatcher);
+
+            Message message = session.createTextMessage(text);
+
+            assertNull("JMSMessageID should not yet be set", message.getJMSMessageID());
+
+            producer.send(message);
+
+            String jmsMessageID = message.getJMSMessageID();
+            assertNotNull("JMSMessageID should be set", jmsMessageID);
+            assertTrue("JMS 'ID:' prefix not found", jmsMessageID.startsWith("ID:"));
+
+            //Get the value that was actually transmitted/received, verify it is a String, compare to what we have locally
+            testPeer.waitForAllHandlersToComplete(1000);
+
+            Object receivedMessageId = propsMatcher.getReceivedMessageId();
+
+            assertTrue("Expected UUID message id to be sent", receivedMessageId instanceof String);
+            assertTrue("Expected JMSMessageId value to be present in AMQP message", jmsMessageID.endsWith(receivedMessageId.toString()));
+        }
+    }
+
+    @Test(timeout=20000)
+    public void testSendingMessageWithUUIDMessageFormat() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            // DONT create a test fixture, we will drive everything directly.
+            String uri = "amqp://127.0.0.1:" + testPeer.getServerPort() + "?jms.messageIDType=UUID";
+            JmsConnectionFactory factory = new JmsConnectionFactory(uri);
+
+            Connection connection = factory.createConnection();
+            testPeer.expectSaslAnonymousConnect();
+            testPeer.expectBegin();
+
+            testPeer.expectBegin();
+            testPeer.expectSenderAttach();
+
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            String queueName = "myQueue";
+            Queue queue = session.createQueue(queueName);
+            MessageProducer producer = session.createProducer(queue);
+
+            String text = "myMessage";
+            MessageHeaderSectionMatcher headersMatcher = new MessageHeaderSectionMatcher(true).withDurable(equalTo(true));
+            MessageAnnotationsSectionMatcher msgAnnotationsMatcher = new MessageAnnotationsSectionMatcher(true);
+            MessagePropertiesSectionMatcher propsMatcher = new MessagePropertiesSectionMatcher(true).withMessageId(isA(UUID.class));
+            TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
+            messageMatcher.setHeadersMatcher(headersMatcher);
+            messageMatcher.setMessageAnnotationsMatcher(msgAnnotationsMatcher);
+            messageMatcher.setPropertiesMatcher(propsMatcher);
+            messageMatcher.setMessageContentMatcher(new EncodedAmqpValueMatcher(text));
+            testPeer.expectTransfer(messageMatcher);
+
+            Message message = session.createTextMessage(text);
+
+            assertNull("JMSMessageID should not yet be set", message.getJMSMessageID());
+
+            producer.send(message);
+
+            String jmsMessageID = message.getJMSMessageID();
+            assertNotNull("JMSMessageID should be set", jmsMessageID);
+            assertTrue("JMS 'ID:' prefix not found", jmsMessageID.startsWith("ID:"));
+
+            //Get the value that was actually transmitted/received, verify it is a UUID, compare to what we have locally
+            testPeer.waitForAllHandlersToComplete(1000);
+
+            Object receivedMessageId = propsMatcher.getReceivedMessageId();
+
+            assertTrue("Expected UUID message id to be sent", receivedMessageId instanceof UUID);
+            assertTrue("Expected JMSMessageId value to be present in AMQP message", jmsMessageID.endsWith(receivedMessageId.toString()));
+        }
+    }
+
     /**
      * Test that after sending a message with the disableMessageID hint set, the message
      * object has a null JMSMessageID value, and no message-id field value was set.
@@ -522,7 +640,7 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
 
     @Test(timeout = 20000)
     public void testRemotelyCloseProducer() throws Exception {
-        final String BREAD_CRUMB = "ErrorMessage";
+        final String BREAD_CRUMB = "ErrorMessageBreadCrumb";
 
         try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
             Connection connection = testFixture.establishConnecton(testPeer);
@@ -564,6 +682,98 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
     }
 
     @Test(timeout = 20000)
+    public void testRemotelyCloseProducerDuringSyncSend() throws Exception {
+        final String BREAD_CRUMB = "ErrorMessageBreadCrumb";
+
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+
+            testPeer.expectBegin();
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+
+            // Expect producer creation, give it credit.
+            testPeer.expectSenderAttach();
+
+            String text = "myMessage";
+            MessageHeaderSectionMatcher headersMatcher = new MessageHeaderSectionMatcher(true).withDurable(equalTo(true));
+            MessageAnnotationsSectionMatcher msgAnnotationsMatcher = new MessageAnnotationsSectionMatcher(true);
+            MessagePropertiesSectionMatcher propsMatcher = new MessagePropertiesSectionMatcher(true);
+            TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
+            messageMatcher.setHeadersMatcher(headersMatcher);
+            messageMatcher.setMessageAnnotationsMatcher(msgAnnotationsMatcher);
+            messageMatcher.setPropertiesMatcher(propsMatcher);
+            messageMatcher.setMessageContentMatcher(new EncodedAmqpValueMatcher(text));
+
+            // Expect a message to be sent, but don't send a disposition in
+            // response, simply remotely close the producer instead.
+            testPeer.expectTransfer(messageMatcher, nullValue(), false, false, null, false);
+            testPeer.remotelyDetachLastOpenedLinkOnLastOpenedSession(true, true, AmqpError.RESOURCE_LIMIT_EXCEEDED, BREAD_CRUMB);
+
+            Queue queue = session.createQueue("myQueue");
+            final MessageProducer producer = session.createProducer(queue);
+
+            Message message = session.createTextMessage(text);
+
+            try {
+                producer.send(message);
+                fail("Expected exception to be thrown");
+            } catch (JMSException jmse) {
+                // Expected
+                assertNotNull("Expected exception to have a message", jmse.getMessage());
+                assertTrue("Expected breadcrumb to be present in message", jmse.getMessage().contains(BREAD_CRUMB));
+            }
+
+            testPeer.waitForAllHandlersToComplete(3000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testRemotelyCloseConnectionDuringSyncSend() throws Exception {
+        final String BREAD_CRUMB = "ErrorMessageBreadCrumb";
+
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+
+            testPeer.expectBegin();
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+
+            // Expect producer creation, give it credit.
+            testPeer.expectSenderAttach();
+
+            String text = "myMessage";
+            MessageHeaderSectionMatcher headersMatcher = new MessageHeaderSectionMatcher(true).withDurable(equalTo(true));
+            MessageAnnotationsSectionMatcher msgAnnotationsMatcher = new MessageAnnotationsSectionMatcher(true);
+            MessagePropertiesSectionMatcher propsMatcher = new MessagePropertiesSectionMatcher(true);
+            TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
+            messageMatcher.setHeadersMatcher(headersMatcher);
+            messageMatcher.setMessageAnnotationsMatcher(msgAnnotationsMatcher);
+            messageMatcher.setPropertiesMatcher(propsMatcher);
+            messageMatcher.setMessageContentMatcher(new EncodedAmqpValueMatcher(text));
+
+            // Expect a message to be sent, but don't send a disposition in
+            // response, simply remotely close the connection instead.
+            testPeer.expectTransfer(messageMatcher, nullValue(), false, false, null, false);
+            testPeer.remotelyCloseConnection(true, AmqpError.RESOURCE_LIMIT_EXCEEDED, BREAD_CRUMB);
+
+            Queue queue = session.createQueue("myQueue");
+            final MessageProducer producer = session.createProducer(queue);
+
+            Message message = session.createTextMessage(text);
+
+            try {
+                producer.send(message);
+                fail("Expected exception to be thrown");
+            } catch (JMSException jmse) {
+                // Expected
+                assertNotNull("Expected exception to have a message", jmse.getMessage());
+                assertTrue("Expected breadcrumb to be present in message", jmse.getMessage().contains(BREAD_CRUMB));
+            }
+
+            testPeer.waitForAllHandlersToComplete(3000);
+        }
+    }
+
+    @Test(timeout = 20000)
     public void testSendWhenLinkCreditIsDelayed() throws Exception {
         try(TestAmqpPeer testPeer = new TestAmqpPeer();) {
             Connection connection = testFixture.establishConnecton(testPeer, "?amqp.traceFrames=true&amqp.traceBytes=true");
@@ -584,6 +794,222 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
             MessageProducer producer = session.createProducer(queue);
 
             producer.send(message);
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testSyncSendMessageRejected() throws Exception {
+        doSyncSendMessageNotAcceptedTestImpl(new Rejected());
+    }
+
+    @Test(timeout = 20000)
+    public void testSyncSendMessageReleased() throws Exception {
+        doSyncSendMessageNotAcceptedTestImpl(new Released());
+    }
+
+    @Test(timeout = 20000)
+    public void testSyncSendMessageModifiedDeliveryFailed() throws Exception {
+        Modified modified = new Modified();
+        modified.setDeliveryFailed(true);
+
+        doSyncSendMessageNotAcceptedTestImpl(modified);
+    }
+
+    @Test(timeout = 20000)
+    public void testSyncSendMessageModifiedUndeliverable() throws Exception {
+        Modified modified = new Modified();
+        modified.setUndeliverableHere(true);
+
+        doSyncSendMessageNotAcceptedTestImpl(modified);
+    }
+
+    @Test(timeout = 20000)
+    public void testSyncSendMessageModifiedDeliveryFailedUndeliverable() throws Exception {
+        Modified modified = new Modified();
+        modified.setDeliveryFailed(true);
+        modified.setUndeliverableHere(true);
+
+        doSyncSendMessageNotAcceptedTestImpl(modified);
+    }
+
+    private void doSyncSendMessageNotAcceptedTestImpl(ListDescribedType responseState) throws JMSException, InterruptedException, Exception, IOException {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            testPeer.expectBegin();
+            testPeer.expectSenderAttach();
+
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            Queue queue = session.createQueue("myQueue");
+            MessageProducer producer = session.createProducer(queue);
+            Message message = session.createTextMessage("content");
+
+            testPeer.expectTransfer(new TransferPayloadCompositeMatcher(), nullValue(), false, responseState, true);
+
+            assertNull("Should not yet have a JMSDestination", message.getJMSDestination());
+
+            try {
+                producer.send(message);
+                fail("Expected an exception to be thrown");
+            } catch (JMSException e) {
+                //TODO: more explicit exception type?
+                // Expected
+            }
+
+            testPeer.waitForAllHandlersToComplete(2000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testAsyncSendMessageRejected() throws Exception {
+        doAsyncSendMessageNotAcceptedTestImpl(new Rejected());
+    }
+
+    @Test(timeout = 20000)
+    public void testAsyncSendMessageReleased() throws Exception {
+        doAsyncSendMessageNotAcceptedTestImpl(new Released());
+    }
+
+    @Test(timeout = 20000)
+    public void testAsyncSendMessageModifiedDeliveryFailed() throws Exception {
+        Modified modified = new Modified();
+        modified.setDeliveryFailed(true);
+
+        doAsyncSendMessageNotAcceptedTestImpl(modified);
+    }
+
+    @Test(timeout = 20000)
+    public void testAsyncSendMessageModifiedUndeliverable() throws Exception {
+        Modified modified = new Modified();
+        modified.setUndeliverableHere(true);
+
+        doAsyncSendMessageNotAcceptedTestImpl(modified);
+    }
+
+    @Test(timeout = 20000)
+    public void testAsyncSendMessageModifiedDeliveryFailedUndeliverable() throws Exception {
+        Modified modified = new Modified();
+        modified.setDeliveryFailed(true);
+        modified.setUndeliverableHere(true);
+
+        doAsyncSendMessageNotAcceptedTestImpl(modified);
+    }
+
+    private void doAsyncSendMessageNotAcceptedTestImpl(ListDescribedType responseState) throws JMSException, InterruptedException, Exception, IOException {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+
+            final CountDownLatch asyncError = new CountDownLatch(1);
+
+            JmsConnection jmsConnection = (JmsConnection) connection;
+            jmsConnection.setForceAsyncSend(true);
+            jmsConnection.setExceptionListener(new ExceptionListener() {
+
+                @Override
+                public void onException(JMSException exception) {
+                    LOG.debug("ExceptionListener got error: {}", exception.getMessage());
+                    asyncError.countDown();
+                }
+            });
+
+            testPeer.expectBegin();
+            testPeer.expectSenderAttach();
+            testPeer.expectSenderAttach();
+
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            Queue queue = session.createQueue("myQueue");
+            MessageProducer producer = session.createProducer(queue);
+
+            // Create a second producer which allows for a safe wait for credit for the
+            // first producer without the need for a sleep.  Otherwise the first producer
+            // might not do an actual async send due to not having received credit yet.
+            session.createProducer(queue);
+
+            Message message = session.createTextMessage("content");
+
+            testPeer.expectTransfer(new TransferPayloadCompositeMatcher(), nullValue(), false, responseState, true);
+
+            assertNull("Should not yet have a JMSDestination", message.getJMSDestination());
+
+            try {
+                producer.send(message);
+            } catch (JMSException e) {
+                LOG.warn("Caught unexpected error: {}", e.getMessage());
+                fail("No expected exception for this send.");
+            }
+
+            assertTrue("Should get a non-fatal error", asyncError.await(10, TimeUnit.SECONDS));
+
+            testPeer.expectTransfer(new TransferPayloadCompositeMatcher());
+
+            try {
+                producer.send(message);
+            } catch (JMSException e) {
+                LOG.warn("Caught unexpected error: {}", e.getMessage());
+                fail("No expected exception for this send.");
+            }
+
+            testPeer.waitForAllHandlersToComplete(2000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testSendWorksWhenConnectionNotStarted() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+
+            testPeer.expectBegin();
+            testPeer.expectSenderAttach();
+
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            Queue destination = session.createQueue(getTestName());
+            MessageProducer producer = session.createProducer(destination);
+
+            MessageHeaderSectionMatcher headersMatcher = new MessageHeaderSectionMatcher(true);
+            MessageAnnotationsSectionMatcher msgAnnotationsMatcher = new MessageAnnotationsSectionMatcher(true);
+            TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
+            messageMatcher.setHeadersMatcher(headersMatcher);
+            messageMatcher.setMessageAnnotationsMatcher(msgAnnotationsMatcher);
+
+            testPeer.expectTransfer(messageMatcher);
+
+            producer.send(session.createMessage());
+
+            testPeer.expectDetach(true, true, true);
+            producer.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testSendWorksAfterConnectionStopped() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            testPeer.expectSenderAttach();
+
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            Queue destination = session.createQueue(getTestName());
+            MessageProducer producer = session.createProducer(destination);
+
+            MessageHeaderSectionMatcher headersMatcher = new MessageHeaderSectionMatcher(true);
+            MessageAnnotationsSectionMatcher msgAnnotationsMatcher = new MessageAnnotationsSectionMatcher(true);
+            TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
+            messageMatcher.setHeadersMatcher(headersMatcher);
+            messageMatcher.setMessageAnnotationsMatcher(msgAnnotationsMatcher);
+
+            testPeer.expectTransfer(messageMatcher);
+
+            connection.stop();
+
+            producer.send(session.createMessage());
+
+            testPeer.expectDetach(true, true, true);
+            producer.close();
+
             testPeer.waitForAllHandlersToComplete(1000);
         }
     }

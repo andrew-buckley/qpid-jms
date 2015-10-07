@@ -30,6 +30,8 @@ import javax.jms.Connection;
 import javax.jms.DeliveryMode;
 import javax.jms.ExceptionListener;
 import javax.jms.JMSException;
+import javax.jms.JMSSecurityException;
+import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.MessageProducer;
 import javax.jms.Queue;
@@ -37,6 +39,7 @@ import javax.jms.Session;
 import javax.jms.Topic;
 
 import org.apache.activemq.broker.jmx.QueueViewMBean;
+import org.apache.qpid.jms.JmsConnection;
 import org.apache.qpid.jms.JmsConnectionFactory;
 import org.apache.qpid.jms.support.AmqpTestSupport;
 import org.apache.qpid.jms.support.Wait;
@@ -65,6 +68,21 @@ public class JmsFailoverTest extends AmqpTestSupport {
         URI brokerURI = new URI("failover://(amqp://127.0.0.1:5678,amqp://localhost:5777," +
                                 getBrokerAmqpConnectionURI() + ")?failover.useReconnectBackOff=false");
         Connection connection = createAmqpConnection(brokerURI);
+        connection.start();
+        connection.close();
+    }
+
+    @Test(timeout=30000, expected = JMSSecurityException.class)
+    public void testCreateConnectionAsUnknwonUser() throws Exception {
+        URI brokerURI = new URI(getAmqpFailoverURI() +
+            "?failover.maxReconnectAttempts=5");
+
+        JmsConnectionFactory factory = new JmsConnectionFactory(brokerURI);
+        factory.setUsername("unknown");
+        factory.setPassword("unknown");
+
+        connection = factory.createConnection();
+        assertNotNull(connection);
         connection.start();
         connection.close();
     }
@@ -272,7 +290,9 @@ public class JmsFailoverTest extends AmqpTestSupport {
                         LOG.debug("Producer sening message #{}", i + 1);
                         producer.send(session.createTextMessage("Message: " + i));
                         sentSome.countDown();
-                        TimeUnit.MILLISECONDS.sleep(50);
+                        if (sentSome.getCount() <= 0) {
+                            TimeUnit.MILLISECONDS.sleep(50);
+                        }
                     }
                 } catch (Exception e) {
                     failed.countDown();
@@ -282,7 +302,7 @@ public class JmsFailoverTest extends AmqpTestSupport {
         producerThread.start();
 
         // Wait until a couple messages get sent on first broker run.
-        assertTrue(sentSome.await(3, TimeUnit.SECONDS));
+        assertTrue(sentSome.await(6, TimeUnit.SECONDS));
         stopPrimaryBroker();
         TimeUnit.SECONDS.sleep(2);  // Gives FailoverProvider some CPU time
         restartPrimaryBroker();
@@ -315,5 +335,133 @@ public class JmsFailoverTest extends AmqpTestSupport {
 
         assertFalse(failed.getCount() == 0);
         connection.close();
+    }
+
+    @Test(timeout = 30000)
+    public void testPullConsumerTimedReceiveRecovers() throws Exception {
+        URI brokerURI = new URI(getAmqpFailoverURI());
+
+        final CountDownLatch started = new CountDownLatch(1);
+        final CountDownLatch received = new CountDownLatch(1);
+
+        connection = createAmqpConnection(brokerURI);
+        connection.start();
+
+        // Make all our consumers pull consumers.
+        JmsConnection jmsConnection = (JmsConnection) connection;
+        jmsConnection.getPrefetchPolicy().setAll(0);
+
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Queue queue = session.createQueue(name.getMethodName());
+        final MessageConsumer consumer = session.createConsumer(queue);
+
+        Thread receiver = new Thread(new Runnable() {
+
+            @Override
+            public void run() {
+                started.countDown();
+                try {
+                    Message message = consumer.receive(10000);
+                    if (message != null) {
+                        received.countDown();
+                    } else {
+                        LOG.info("Consumer did not get a message");
+                    }
+                } catch (Exception e) {
+                }
+            }
+        });
+        receiver.start();
+
+        assertTrue(started.await(10, TimeUnit.SECONDS));
+        assertEquals(1, brokerService.getAdminView().getQueueSubscribers().length);
+        TimeUnit.MILLISECONDS.sleep(50);
+
+        restartPrimaryBroker();
+
+        assertTrue("Should have a new connection.", Wait.waitFor(new Wait.Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return brokerService.getAdminView().getCurrentConnectionsCount() == 1;
+            }
+        }, TimeUnit.SECONDS.toMillis(30), TimeUnit.MILLISECONDS.toMillis(100)));
+
+        assertTrue("Should one new Queue Subscription.", Wait.waitFor(new Wait.Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return brokerService.getAdminView().getQueueSubscribers().length == 1;
+            }
+        }, TimeUnit.SECONDS.toMillis(30), TimeUnit.MILLISECONDS.toMillis(50)));
+
+        MessageProducer producer = session.createProducer(queue);
+        producer.send(session.createMessage());
+
+        assertTrue("Consumer should have recovered", received.await(30, TimeUnit.SECONDS));
+    }
+
+    @Test(timeout = 30000)
+    public void testPullConsumerReceiveRecovers() throws Exception {
+        URI brokerURI = new URI(getAmqpFailoverURI());
+
+        final CountDownLatch started = new CountDownLatch(1);
+        final CountDownLatch received = new CountDownLatch(1);
+
+        connection = createAmqpConnection(brokerURI);
+        connection.start();
+
+        // Make all our consumers pull consumers.
+        JmsConnection jmsConnection = (JmsConnection) connection;
+        jmsConnection.getPrefetchPolicy().setAll(0);
+
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Queue queue = session.createQueue(name.getMethodName());
+        final MessageConsumer consumer = session.createConsumer(queue);
+
+        Thread receiver = new Thread(new Runnable() {
+
+            @Override
+            public void run() {
+                started.countDown();
+                try {
+                    Message message = consumer.receive();
+                    if (message != null) {
+                        received.countDown();
+                    } else {
+                        LOG.info("Consumer did not get a message");
+                    }
+                } catch (Exception e) {
+                }
+            }
+        });
+        receiver.start();
+
+        assertTrue(started.await(10, TimeUnit.SECONDS));
+        assertEquals(1, brokerService.getAdminView().getQueueSubscribers().length);
+        TimeUnit.MILLISECONDS.sleep(50);
+
+        restartPrimaryBroker();
+
+        assertTrue("Should have a new connection.", Wait.waitFor(new Wait.Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return brokerService.getAdminView().getCurrentConnectionsCount() == 1;
+            }
+        }, TimeUnit.SECONDS.toMillis(30), TimeUnit.MILLISECONDS.toMillis(100)));
+
+        assertTrue("Should one new Queue Subscription.", Wait.waitFor(new Wait.Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return brokerService.getAdminView().getQueueSubscribers().length == 1;
+            }
+        }, TimeUnit.SECONDS.toMillis(30), TimeUnit.MILLISECONDS.toMillis(50)));
+
+        MessageProducer producer = session.createProducer(queue);
+        producer.send(session.createMessage());
+
+        assertTrue("Consumer should have recovered", received.await(30, TimeUnit.SECONDS));
     }
 }

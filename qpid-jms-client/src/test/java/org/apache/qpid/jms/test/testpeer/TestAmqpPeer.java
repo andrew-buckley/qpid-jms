@@ -18,6 +18,7 @@
  */
 package org.apache.qpid.jms.test.testpeer;
 
+import static org.apache.qpid.jms.provider.amqp.AmqpSupport.DYNAMIC_NODE_LIFETIME_POLICY;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.equalTo;
@@ -38,7 +39,6 @@ import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLContext;
 
 import org.apache.qpid.jms.provider.amqp.AmqpSupport;
-import org.apache.qpid.jms.provider.amqp.AmqpTemporaryDestination;
 import org.apache.qpid.jms.provider.amqp.message.AmqpDestinationHelper;
 import org.apache.qpid.jms.test.testpeer.basictypes.ReceiverSettleMode;
 import org.apache.qpid.jms.test.testpeer.basictypes.Role;
@@ -55,12 +55,12 @@ import org.apache.qpid.jms.test.testpeer.describedtypes.DispositionFrame;
 import org.apache.qpid.jms.test.testpeer.describedtypes.EndFrame;
 import org.apache.qpid.jms.test.testpeer.describedtypes.FlowFrame;
 import org.apache.qpid.jms.test.testpeer.describedtypes.OpenFrame;
+import org.apache.qpid.jms.test.testpeer.describedtypes.Released;
 import org.apache.qpid.jms.test.testpeer.describedtypes.SaslMechanismsFrame;
 import org.apache.qpid.jms.test.testpeer.describedtypes.SaslOutcomeFrame;
 import org.apache.qpid.jms.test.testpeer.describedtypes.Source;
 import org.apache.qpid.jms.test.testpeer.describedtypes.Target;
 import org.apache.qpid.jms.test.testpeer.describedtypes.TransferFrame;
-import org.apache.qpid.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import org.apache.qpid.jms.test.testpeer.describedtypes.sections.ApplicationPropertiesDescribedType;
 import org.apache.qpid.jms.test.testpeer.describedtypes.sections.HeaderDescribedType;
 import org.apache.qpid.jms.test.testpeer.describedtypes.sections.MessageAnnotationsDescribedType;
@@ -96,6 +96,8 @@ import org.slf4j.LoggerFactory;
 public class TestAmqpPeer implements AutoCloseable
 {
     private static final Logger LOGGER = LoggerFactory.getLogger(TestAmqpPeer.class.getName());
+
+    public static final String MESSAGE_NUMBER = "MessageNumber";
 
     private static final Symbol ANONYMOUS = Symbol.valueOf("ANONYMOUS");
     private static final Symbol EXTERNAL = Symbol.valueOf("EXTERNAL");
@@ -133,7 +135,7 @@ public class TestAmqpPeer implements AutoCloseable
     public TestAmqpPeer(SSLContext context, boolean needClientCert) throws IOException
     {
         _driverRunnable = new TestAmqpPeerRunner(this, context, needClientCert);
-        _driverThread = new Thread(_driverRunnable, "MockAmqpPeerThread");
+        _driverThread = new Thread(_driverRunnable, "MockAmqpPeer-" + _driverRunnable.getServerPort());
         _driverThread.start();
     }
 
@@ -301,15 +303,19 @@ public class TestAmqpPeer implements AutoCloseable
 
     public void waitForAllHandlersToComplete(int timeoutMillis) throws InterruptedException
     {
+        boolean countedDownOk =  waitForAllHandlersToCompleteNoAssert(timeoutMillis);
+
+        Assert.assertTrue("All handlers should have completed within the " + timeoutMillis + "ms timeout", countedDownOk);
+    }
+
+    public boolean waitForAllHandlersToCompleteNoAssert(int timeoutMillis) throws InterruptedException
+    {
         synchronized(_handlersLock)
         {
             _handlersCompletedLatch = new CountDownLatch(_handlers.size());
         }
 
-        boolean countedDownOk = _handlersCompletedLatch.await(timeoutMillis, TimeUnit.MILLISECONDS);
-
-        Assert.assertTrue(
-                "All handlers should have completed within the " + timeoutMillis + "ms timeout", countedDownOk);
+        return _handlersCompletedLatch.await(timeoutMillis, TimeUnit.MILLISECONDS);
     }
 
     void sendHeader(byte[] header)
@@ -608,10 +614,10 @@ public class TestAmqpPeer implements AutoCloseable
 
     public void expectBegin()
     {
-        expectBegin(notNullValue());
+        expectBegin(notNullValue(), true);
     }
 
-    public void expectBegin(Matcher<?> outgoingWindowMatcher)
+    public void expectBegin(Matcher<?> outgoingWindowMatcher, boolean sendResponse)
     {
         final BeginMatcher beginMatcher = new BeginMatcher()
                 .withRemoteChannel(nullValue())
@@ -626,29 +632,31 @@ public class TestAmqpPeer implements AutoCloseable
             beginMatcher.withOutgoingWindow(outgoingWindowMatcher);
         }
 
-        // The response will have its remoteChannel field dynamically set based on incoming value
-        final BeginFrame beginResponse = new BeginFrame()
+        if(sendResponse) {
+            // The response will have its remoteChannel field dynamically set based on incoming value
+            final BeginFrame beginResponse = new BeginFrame()
             .setNextOutgoingId(UnsignedInteger.ONE)
             .setIncomingWindow(UnsignedInteger.ZERO)
             .setOutgoingWindow(UnsignedInteger.ZERO);
 
-        // The response frame channel will be dynamically set based on the incoming frame. Using the -1 is an illegal placeholder.
-        final FrameSender beginResponseSender = new FrameSender(this, FrameType.AMQP, -1, beginResponse, null);
-        beginResponseSender.setValueProvider(new ValueProvider()
-        {
-            @Override
-            public void setValues()
+            // The response frame channel will be dynamically set based on the incoming frame. Using the -1 is an illegal placeholder.
+            final FrameSender beginResponseSender = new FrameSender(this, FrameType.AMQP, -1, beginResponse, null);
+            beginResponseSender.setValueProvider(new ValueProvider()
             {
-                int actualChannel = beginMatcher.getActualChannel();
+                @Override
+                public void setValues()
+                {
+                    int actualChannel = beginMatcher.getActualChannel();
 
-                beginResponseSender.setChannel(actualChannel);
-                beginResponse.setRemoteChannel(
-                        UnsignedShort.valueOf((short) actualChannel));
+                    beginResponseSender.setChannel(actualChannel);
+                    beginResponse.setRemoteChannel(
+                            UnsignedShort.valueOf((short) actualChannel));
 
-                _lastInitiatedChannel = actualChannel;
-            }
-        });
-        beginMatcher.onCompletion(beginResponseSender);
+                    _lastInitiatedChannel = actualChannel;
+                }
+            });
+            beginMatcher.onCompletion(beginResponseSender);
+        }
 
         addHandler(beginMatcher);
     }
@@ -708,7 +716,7 @@ public class TestAmqpPeer implements AutoCloseable
         targetMatcher.withDynamic(equalTo(true));
         targetMatcher.withDurable(equalTo(TerminusDurability.NONE));
         targetMatcher.withExpiryPolicy(equalTo(TerminusExpiryPolicy.LINK_DETACH));
-        targetMatcher.withDynamicNodeProperties(hasEntry(equalTo(AmqpTemporaryDestination.DYNAMIC_NODE_LIFETIME_POLICY), new DeleteOnCloseMatcher()));
+        targetMatcher.withDynamicNodeProperties(hasEntry(equalTo(DYNAMIC_NODE_LIFETIME_POLICY), new DeleteOnCloseMatcher()));
         targetMatcher.withCapabilities(arrayContaining(nodeTypeCapability));
 
         final AttachMatcher attachMatcher = new AttachMatcher()
@@ -932,30 +940,50 @@ public class TestAmqpPeer implements AutoCloseable
         addHandler(attachMatcher);
     }
 
+    public void expectQueueBrowserAttach()
+    {
+        expectReceiverAttach(notNullValue(), notNullValue(), true);
+    }
+
+    public void expectReceiverAttach()
+    {
+        expectReceiverAttach(notNullValue(), notNullValue());
+    }
+
     public void expectReceiverAttach(final Matcher<?> linkNameMatcher, final Matcher<?> sourceMatcher)
     {
-        expectReceiverAttach(linkNameMatcher, sourceMatcher, false, false, null, null);
+        expectReceiverAttach(linkNameMatcher, sourceMatcher, false, false, false, null, null);
+    }
+
+    public void expectReceiverAttach(final Matcher<?> linkNameMatcher, final Matcher<?> sourceMatcher, final boolean settled)
+    {
+        expectReceiverAttach(linkNameMatcher, sourceMatcher, settled, false, false, null, null);
     }
 
     public void expectReceiverAttach(final Matcher<?> linkNameMatcher, final Matcher<?> sourceMatcher, final boolean refuseLink, boolean deferAttachResponseWrite)
     {
-        expectReceiverAttach(linkNameMatcher, sourceMatcher, refuseLink, deferAttachResponseWrite, null, null);
+        expectReceiverAttach(linkNameMatcher, sourceMatcher, false, refuseLink, deferAttachResponseWrite, null, null);
     }
 
-    public void expectReceiverAttach(final Matcher<?> linkNameMatcher, final Matcher<?> sourceMatcher, final boolean refuseLink, boolean deferAttachResponseWrite, Symbol errorType, String errorMessage)
+    public void expectReceiverAttach(final Matcher<?> linkNameMatcher, final Matcher<?> sourceMatcher, final boolean settled, final boolean refuseLink, boolean deferAttachResponseWrite)
+    {
+        expectReceiverAttach(linkNameMatcher, sourceMatcher, settled, refuseLink, deferAttachResponseWrite, null, null);
+    }
+
+    public void expectReceiverAttach(final Matcher<?> linkNameMatcher, final Matcher<?> sourceMatcher, final boolean settled, final boolean refuseLink, boolean deferAttachResponseWrite, Symbol errorType, String errorMessage)
     {
         final AttachMatcher attachMatcher = new AttachMatcher()
                 .withName(linkNameMatcher)
                 .withHandle(notNullValue())
                 .withRole(equalTo(Role.RECEIVER))
-                .withSndSettleMode(equalTo(SenderSettleMode.UNSETTLED))
+                .withSndSettleMode(equalTo(settled ? SenderSettleMode.SETTLED : SenderSettleMode.UNSETTLED))
                 .withRcvSettleMode(equalTo(ReceiverSettleMode.FIRST))
                 .withSource(sourceMatcher)
                 .withTarget(notNullValue());
 
         final AttachFrame attachResponse = new AttachFrame()
                             .setRole(Role.SENDER)
-                            .setSndSettleMode(SenderSettleMode.UNSETTLED)
+                            .setSndSettleMode(settled ? SenderSettleMode.SETTLED : SenderSettleMode.UNSETTLED)
                             .setRcvSettleMode(ReceiverSettleMode.FIRST)
                             .setInitialDeliveryCount(UnsignedInteger.ZERO);
 
@@ -1025,11 +1053,6 @@ public class TestAmqpPeer implements AutoCloseable
         addHandler(attachMatcher);
     }
 
-    public void expectReceiverAttach()
-    {
-        expectReceiverAttach(notNullValue(), notNullValue());
-    }
-
     public void expectDurableSubscriberAttach(String topicName, String subscriptionName)
     {
         SourceMatcher sourceMatcher = new SourceMatcher();
@@ -1096,16 +1119,21 @@ public class TestAmqpPeer implements AutoCloseable
         expectLinkFlow(false, false, Matchers.greaterThan(UnsignedInteger.ZERO));
     }
 
+    public void expectLinkFlow(boolean drain, Matcher<UnsignedInteger> creditMatcher)
+    {
+        expectLinkFlow(drain, false, creditMatcher);
+    }
+
     public void expectLinkFlow(boolean drain, boolean sendDrainFlowResponse, Matcher<UnsignedInteger> creditMatcher)
     {
-        expectLinkFlowRespondWithTransfer(null, null, null, null, null, 0, drain, sendDrainFlowResponse, creditMatcher, null);
+        expectLinkFlowRespondWithTransfer(null, null, null, null, null, 0, drain, sendDrainFlowResponse, creditMatcher, null, false, false);
     }
 
     public void expectLinkFlowRespondWithTransfer(final HeaderDescribedType headerDescribedType,
-                                                 final MessageAnnotationsDescribedType messageAnnotationsDescribedType,
-                                                 final PropertiesDescribedType propertiesDescribedType,
-                                                 final ApplicationPropertiesDescribedType appPropertiesDescribedType,
-                                                 final DescribedType content)
+                                                  final MessageAnnotationsDescribedType messageAnnotationsDescribedType,
+                                                  final PropertiesDescribedType propertiesDescribedType,
+                                                  final ApplicationPropertiesDescribedType appPropertiesDescribedType,
+                                                  final DescribedType content)
     {
         expectLinkFlowRespondWithTransfer(headerDescribedType, messageAnnotationsDescribedType, propertiesDescribedType,
                                           appPropertiesDescribedType, content, 1);
@@ -1120,19 +1148,38 @@ public class TestAmqpPeer implements AutoCloseable
     {
         expectLinkFlowRespondWithTransfer(headerDescribedType, messageAnnotationsDescribedType, propertiesDescribedType,
                                           appPropertiesDescribedType, content, count, false, false,
-                                          Matchers.greaterThanOrEqualTo(UnsignedInteger.valueOf(count)), 1);
+                                          Matchers.greaterThanOrEqualTo(UnsignedInteger.valueOf(count)), 1, false, false);
+    }
+
+    public void expectLinkFlowRespondWithTransfer(final HeaderDescribedType headerDescribedType,
+                                                  final MessageAnnotationsDescribedType messageAnnotationsDescribedType,
+                                                  final PropertiesDescribedType propertiesDescribedType,
+                                                  ApplicationPropertiesDescribedType appPropertiesDescribedType,
+                                                  final DescribedType content,
+                                                  final int count,
+                                                  final boolean drain,
+                                                  final boolean sendDrainFlowResponse,
+                                                  Matcher<UnsignedInteger> creditMatcher,
+                                                  final Integer nextIncomingId,
+                                                  boolean addMessageNumberProperty)
+    {
+        expectLinkFlowRespondWithTransfer(headerDescribedType, messageAnnotationsDescribedType, propertiesDescribedType,
+                                          appPropertiesDescribedType, content, count, drain, sendDrainFlowResponse,
+                                          creditMatcher, nextIncomingId, false, addMessageNumberProperty);
     }
 
     public void expectLinkFlowRespondWithTransfer(final HeaderDescribedType headerDescribedType,
             final MessageAnnotationsDescribedType messageAnnotationsDescribedType,
             final PropertiesDescribedType propertiesDescribedType,
-            final ApplicationPropertiesDescribedType appPropertiesDescribedType,
+            ApplicationPropertiesDescribedType appPropertiesDescribedType,
             final DescribedType content,
             final int count,
             final boolean drain,
             final boolean sendDrainFlowResponse,
             Matcher<UnsignedInteger> creditMatcher,
-            final Integer nextIncomingId)
+            final Integer nextIncomingId,
+            final boolean sendSettled,
+            boolean addMessageNumberProperty)
     {
         if (nextIncomingId == null && count > 0)
         {
@@ -1160,12 +1207,16 @@ public class TestAmqpPeer implements AutoCloseable
         }
 
         final FlowMatcher flowMatcher = new FlowMatcher()
-                        .withLinkCredit(Matchers.greaterThanOrEqualTo(UnsignedInteger.valueOf(count)))
+                        .withLinkCredit(creditMatcher)
                         .withDrain(drainMatcher)
                         .withNextIncomingId(remoteNextIncomingIdMatcher);
 
         CompositeAmqpPeerRunnable composite = new CompositeAmqpPeerRunnable();
         boolean addComposite = false;
+
+        if (appPropertiesDescribedType == null && addMessageNumberProperty) {
+            appPropertiesDescribedType = new ApplicationPropertiesDescribedType();
+        }
 
         for(int i = 0; i < count; i++)
         {
@@ -1174,11 +1225,15 @@ public class TestAmqpPeer implements AutoCloseable
             String tagString = "theDeliveryTag" + nextId;
             Binary dtag = new Binary(tagString.getBytes());
 
+            if(addMessageNumberProperty) {
+                appPropertiesDescribedType.setApplicationProperty(MESSAGE_NUMBER, i);
+            }
+
             final TransferFrame transferResponse = new TransferFrame()
             .setDeliveryId(UnsignedInteger.valueOf(nextId))
             .setDeliveryTag(dtag)
             .setMessageFormat(UnsignedInteger.ZERO)
-            .setSettled(false);
+            .setSettled(sendSettled);
 
             Binary payload = prepareTransferPayload(headerDescribedType, messageAnnotationsDescribedType,
                     propertiesDescribedType, appPropertiesDescribedType, content);
@@ -1284,12 +1339,18 @@ public class TestAmqpPeer implements AutoCloseable
 
     public void expectTransfer(Matcher<Binary> expectedPayloadMatcher)
     {
-        expectTransfer(expectedPayloadMatcher, nullValue(), false, new Accepted(), true);
+        expectTransfer(expectedPayloadMatcher, nullValue(), false, true, new Accepted(), true);
+    }
+
+    public void expectTransfer(Matcher<Binary> expectedPayloadMatcher, Matcher<?> stateMatcher, boolean settled,
+                               ListDescribedType responseState, boolean responseSettled)
+    {
+        expectTransfer(expectedPayloadMatcher, stateMatcher, settled, true, responseState, responseSettled);
     }
 
     //TODO: fix responseState to only admit applicable types.
     public void expectTransfer(Matcher<Binary> expectedPayloadMatcher, Matcher<?> stateMatcher, boolean settled,
-                               ListDescribedType responseState, boolean responseSettled)
+                               boolean sendResponseDisposition, ListDescribedType responseState, boolean responseSettled)
     {
         Matcher<Boolean> settledMatcher = null;
         if(settled)
@@ -1306,23 +1367,26 @@ public class TestAmqpPeer implements AutoCloseable
         transferMatcher.withSettled(settledMatcher);
         transferMatcher.withState(stateMatcher);
 
-        final DispositionFrame dispositionResponse = new DispositionFrame()
-                                                   .setRole(Role.RECEIVER)
-                                                   .setSettled(responseSettled)
-                                                   .setState(responseState);
+        if(sendResponseDisposition) {
+            final DispositionFrame dispositionResponse = new DispositionFrame()
+                                                       .setRole(Role.RECEIVER)
+                                                       .setSettled(responseSettled)
+                                                       .setState(responseState);
 
-        // The response frame channel will be dynamically set based on the incoming frame. Using the -1 is an illegal placeholder.
-        final FrameSender dispositionFrameSender = new FrameSender(this, FrameType.AMQP, -1, dispositionResponse, null);
-        dispositionFrameSender.setValueProvider(new ValueProvider()
-        {
-            @Override
-            public void setValues()
+            // The response frame channel will be dynamically set based on the incoming frame. Using the -1 is an illegal placeholder.
+            final FrameSender dispositionFrameSender = new FrameSender(this, FrameType.AMQP, -1, dispositionResponse, null);
+            dispositionFrameSender.setValueProvider(new ValueProvider()
             {
-                dispositionFrameSender.setChannel(transferMatcher.getActualChannel());
-                dispositionResponse.setFirst(transferMatcher.getReceivedDeliveryId());
-            }
-        });
-        transferMatcher.onCompletion(dispositionFrameSender);
+                @Override
+                public void setValues()
+                {
+                    dispositionFrameSender.setChannel(transferMatcher.getActualChannel());
+                    dispositionResponse.setFirst(transferMatcher.getReceivedDeliveryId());
+                }
+            });
+
+            transferMatcher.onCompletion(dispositionFrameSender);
+        }
 
         addHandler(transferMatcher);
     }
@@ -1332,7 +1396,17 @@ public class TestAmqpPeer implements AutoCloseable
         expectDisposition(true, new DescriptorMatcher(Accepted.DESCRIPTOR_CODE, Accepted.DESCRIPTOR_SYMBOL));
     }
 
+    public void expectDispositionThatIsReleasedAndSettled()
+    {
+        expectDisposition(true, new DescriptorMatcher(Released.DESCRIPTOR_CODE, Released.DESCRIPTOR_SYMBOL));
+    }
+
     public void expectDisposition(boolean settled, Matcher<?> stateMatcher)
+    {
+        expectDisposition(settled, stateMatcher, null, null);
+    }
+
+    public void expectDisposition(boolean settled, Matcher<?> stateMatcher, Integer firstDeliveryId, Integer lastDeliveryId)
     {
         Matcher<Boolean> settledMatcher = null;
         if(settled)
@@ -1344,8 +1418,20 @@ public class TestAmqpPeer implements AutoCloseable
             settledMatcher = Matchers.anyOf(equalTo(false), nullValue());
         }
 
+        Matcher<?> firstDeliveryIdMatcher = notNullValue();
+        if(firstDeliveryId != null) {
+            firstDeliveryIdMatcher = equalTo(UnsignedInteger.valueOf(firstDeliveryId));
+        }
+
+        Matcher<?> lastDeliveryIdMatcher = notNullValue();
+        if(lastDeliveryId != null) {
+            lastDeliveryIdMatcher = equalTo(UnsignedInteger.valueOf(lastDeliveryId));
+        }
+
         addHandler(new DispositionMatcher()
             .withSettled(settledMatcher)
+            .withFirst(firstDeliveryIdMatcher)
+            .withLast(lastDeliveryIdMatcher)
             .withState(stateMatcher));
     }
 
@@ -1515,22 +1601,36 @@ public class TestAmqpPeer implements AutoCloseable
         return comp;
     }
 
-    public void sendTransferToLastOpenedLinkOnLastOpenedSession() {
+    public void sendTransferToLastOpenedLinkOnLastOpenedSession(final HeaderDescribedType headerDescribedType,
+                                                                final MessageAnnotationsDescribedType messageAnnotationsDescribedType,
+                                                                final PropertiesDescribedType propertiesDescribedType,
+                                                                final ApplicationPropertiesDescribedType appPropertiesDescribedType,
+                                                                final DescribedType content,
+                                                                final int nextIncomingDeliveryId) {
+
+        sendTransferToLastOpenedLinkOnLastOpenedSession(headerDescribedType, messageAnnotationsDescribedType, propertiesDescribedType, appPropertiesDescribedType, content, nextIncomingDeliveryId, false);
+    }
+
+    public void sendTransferToLastOpenedLinkOnLastOpenedSession(final HeaderDescribedType headerDescribedType,
+                                                                final MessageAnnotationsDescribedType messageAnnotationsDescribedType,
+                                                                final PropertiesDescribedType propertiesDescribedType,
+                                                                final ApplicationPropertiesDescribedType appPropertiesDescribedType,
+                                                                final DescribedType content,
+                                                                final int nextIncomingDeliveryId,
+                                                                final boolean sendSettled) {
         synchronized (_handlersLock) {
             CompositeAmqpPeerRunnable comp = insertCompsiteActionForLastHandler();
 
-            final int nextId = 0; //TODO: shouldn't be hard coded
-
-            String tagString = "theDeliveryTag" + nextId;
+            String tagString = "theDeliveryTag" + nextIncomingDeliveryId;
             Binary dtag = new Binary(tagString.getBytes());
 
             final TransferFrame transferResponse = new TransferFrame()
-            .setDeliveryId(UnsignedInteger.valueOf(nextId))
+            .setDeliveryId(UnsignedInteger.valueOf(nextIncomingDeliveryId))
             .setDeliveryTag(dtag)
             .setMessageFormat(UnsignedInteger.ZERO)
-            .setSettled(false);
+            .setSettled(sendSettled);
 
-            Binary payload = prepareTransferPayload(null, null, null, null, new AmqpValueDescribedType("myTextMessage"));
+            Binary payload = prepareTransferPayload(headerDescribedType, messageAnnotationsDescribedType, propertiesDescribedType, appPropertiesDescribedType, content);
 
             // The response frame channel will be dynamically set based on the incoming frame. Using the -1 is an illegal placeholder.
             final FrameSender transferSender = new FrameSender(this, FrameType.AMQP, -1, transferResponse, payload);
@@ -1561,5 +1661,41 @@ public class TestAmqpPeer implements AutoCloseable
         {
             _firstAssertionError = ae;
         }
+    }
+
+    public void expectSaslHeaderThenDrop() {
+        AmqpPeerRunnable exitAfterHeader = new AmqpPeerRunnable() {
+            @Override
+            public void run() {
+                _driverRunnable.exitReadLoopEarly();
+            }
+        };
+
+        addHandler(new HeaderHandlerImpl(AmqpHeader.SASL_HEADER, AmqpHeader.SASL_HEADER, exitAfterHeader));
+    }
+
+
+    public void dropAfterLastHandler() {
+        dropAfterLastHandler(0);
+    }
+
+    public void dropAfterLastHandler(final long delay) {
+        AmqpPeerRunnable exitEarly = new AmqpPeerRunnable() {
+            @Override
+            public void run() {
+                if(delay > 0) {
+                    try {
+                        Thread.sleep(delay);
+                    } catch (InterruptedException e) {
+                        LOGGER.warn("Interrupted while delaying before read loop exit");
+                        Thread.currentThread().interrupt();
+                    }
+                }
+
+                _driverRunnable.exitReadLoopEarly();
+            }
+        };
+
+        runAfterLastHandler(exitEarly);
     }
 }

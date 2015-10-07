@@ -21,6 +21,7 @@ import java.net.URI;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
@@ -54,6 +55,7 @@ import org.apache.qpid.jms.exceptions.JmsExceptionSupport;
 import org.apache.qpid.jms.message.JmsInboundMessageDispatch;
 import org.apache.qpid.jms.message.JmsMessage;
 import org.apache.qpid.jms.message.JmsMessageFactory;
+import org.apache.qpid.jms.message.JmsMessageIDBuilder;
 import org.apache.qpid.jms.message.JmsOutboundMessageDispatch;
 import org.apache.qpid.jms.meta.JmsConnectionId;
 import org.apache.qpid.jms.meta.JmsConnectionInfo;
@@ -64,6 +66,7 @@ import org.apache.qpid.jms.meta.JmsResource;
 import org.apache.qpid.jms.meta.JmsSessionId;
 import org.apache.qpid.jms.meta.JmsSessionInfo;
 import org.apache.qpid.jms.meta.JmsTransactionId;
+import org.apache.qpid.jms.provider.AsyncResult;
 import org.apache.qpid.jms.provider.Provider;
 import org.apache.qpid.jms.provider.ProviderClosedException;
 import org.apache.qpid.jms.provider.ProviderConstants.ACK_TYPE;
@@ -90,22 +93,16 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     private final AtomicBoolean closing = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean failed = new AtomicBoolean();
-    private final Object connectLock = new Object();
-    private IOException firstFailureError;
-
-    private JmsConnectionInfo connectionInfo;
-    private URI configuredURI;
-    private URI connectedURI;
-    private JmsPrefetchPolicy prefetchPolicy = new JmsPrefetchPolicy();
-    private JmsRedeliveryPolicy redeliveryPolicy = new JmsRedeliveryPolicy();
-    private boolean localMessagePriority;
-    private boolean clientIdSet;
-    private boolean sendAcksAsync;
-    private ExceptionListener exceptionListener;
-
+    private final JmsConnectionInfo connectionInfo;
     private final ThreadPoolExecutor executor;
 
+    private IOException firstFailureError;
+    private boolean clientIdSet;
+    private ExceptionListener exceptionListener;
+    private JmsMessageFactory messageFactory;
     private Provider provider;
+    private JmsMessageIDBuilder messageIDBuilder;
+
     private final Set<JmsConnectionListener> connectionListeners =
         new CopyOnWriteArraySet<JmsConnectionListener>();
     private final Map<JmsTemporaryDestination, JmsTemporaryDestination> tempDestinations =
@@ -113,7 +110,8 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     private final AtomicLong sessionIdGenerator = new AtomicLong();
     private final AtomicLong tempDestIdGenerator = new AtomicLong();
     private final AtomicLong transactionIdGenerator = new AtomicLong();
-    private JmsMessageFactory messageFactory;
+
+    private final ConcurrentMap<AsyncResult, AsyncResult> requests = new ConcurrentHashMap<AsyncResult, AsyncResult>();
 
     protected JmsConnection(final String connectionId, Provider provider, IdGenerator clientIdGenerator) throws JMSException {
 
@@ -503,11 +501,11 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     protected void removeSession(JmsSessionInfo sessionInfo) throws JMSException {
-        sessions.remove(sessionInfo.getSessionId());
+        sessions.remove(sessionInfo.getId());
     }
 
     protected void addSession(JmsSessionInfo sessionInfo, JmsSession session) {
-        sessions.put(sessionInfo.getSessionId(), session);
+        sessions.put(sessionInfo.getId(), session);
     }
 
     protected void addDispatcher(JmsConsumerId consumerId, JmsMessageDispatcher dispatcher) {
@@ -519,7 +517,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     private void connect() throws JMSException {
-        synchronized(this.connectLock) {
+        synchronized(this.connectionInfo) {
             if (isConnected() || closed.get()) {
                 return;
             }
@@ -537,7 +535,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
      * @return a newly initialized TemporaryQueue instance.
      */
     protected TemporaryQueue createTemporaryQueue() throws JMSException {
-        String destinationName = connectionInfo.getConnectionId() + ":" + tempDestIdGenerator.incrementAndGet();
+        String destinationName = connectionInfo.getId() + ":" + tempDestIdGenerator.incrementAndGet();
         JmsTemporaryQueue queue = new JmsTemporaryQueue(destinationName);
         createResource(queue);
         tempDestinations.put(queue, queue);
@@ -549,7 +547,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
      * @return a newly initialized TemporaryTopic instance.
      */
     protected TemporaryTopic createTemporaryTopic() throws JMSException {
-        String destinationName = connectionInfo.getConnectionId() + ":" + tempDestIdGenerator.incrementAndGet();
+        String destinationName = connectionInfo.getId() + ":" + tempDestIdGenerator.incrementAndGet();
         JmsTemporaryTopic topic = new JmsTemporaryTopic(destinationName);
         createResource(topic);
         tempDestinations.put(topic, topic);
@@ -600,11 +598,11 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     protected JmsSessionId getNextSessionId() {
-        return new JmsSessionId(connectionInfo.getConnectionId(), sessionIdGenerator.incrementAndGet());
+        return new JmsSessionId(connectionInfo.getId(), sessionIdGenerator.incrementAndGet());
     }
 
     protected JmsTransactionId getNextTransactionId() {
-        return new JmsTransactionId(connectionInfo.getConnectionId(), transactionIdGenerator.incrementAndGet());
+        return new JmsTransactionId(connectionInfo.getId(), transactionIdGenerator.incrementAndGet());
     }
 
     protected synchronized boolean isExplicitClientID() {
@@ -618,8 +616,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.create(resource, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.create(resource, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ex) {
             throw JmsExceptionSupport.create(ex);
         }
@@ -630,8 +633,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.start(resource, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.start(resource, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -642,8 +650,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.stop(resource, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.stop(resource, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -654,8 +667,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.destroy(resource, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.destroy(resource, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -677,8 +695,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
         //        this level.
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.send(envelope, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.send(envelope, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -716,8 +739,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.unsubscribe(name, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.unsubscribe(name, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -729,8 +757,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.commit(sessionId, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.commit(sessionId, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -742,8 +775,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.rollback(sessionId, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.rollback(sessionId, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -755,8 +793,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.recover(sessionId, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.recover(sessionId, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -768,8 +811,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         try {
             ProviderFuture request = new ProviderFuture();
-            provider.pull(consumerId, timeout, request);
-            request.sync();
+            requests.put(request, request);
+            try {
+                provider.pull(consumerId, timeout, request);
+                request.sync();
+            } finally {
+                requests.remove(request);
+            }
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
@@ -797,7 +845,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
      *        the new listener to add to the collection.
      */
     public void addConnectionListener(JmsConnectionListener listener) {
-        this.connectionListeners.add(listener);
+        connectionListeners.add(listener);
     }
 
     /**
@@ -809,7 +857,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
      * @return true if the given listener was removed from the current set.
      */
     public boolean removeConnectionListener(JmsConnectionListener listener) {
-        return this.connectionListeners.remove(listener);
+        return connectionListeners.remove(listener);
     }
 
     public boolean isForceAsyncSend() {
@@ -825,7 +873,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     public void setAlwaysSyncSend(boolean alwaysSyncSend) {
-        this.connectionInfo.setAlwaysSyncSend(alwaysSyncSend);
+        connectionInfo.setAlwaysSyncSend(alwaysSyncSend);
     }
 
     public String getTopicPrefix() {
@@ -853,27 +901,43 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     public JmsPrefetchPolicy getPrefetchPolicy() {
-        return prefetchPolicy;
+        return connectionInfo.getPrefetchPolicy();
     }
 
     public void setPrefetchPolicy(JmsPrefetchPolicy prefetchPolicy) {
-        this.prefetchPolicy = prefetchPolicy.copy();
+        connectionInfo.setPrefetchPolicy(prefetchPolicy);
     }
 
     public JmsRedeliveryPolicy getRedeliveryPolicy() {
-        return redeliveryPolicy;
+        return connectionInfo.getRedeliveryPolicy();
     }
 
     public void setRedeliveryPolicy(JmsRedeliveryPolicy redeliveryPolicy) {
-        this.redeliveryPolicy = redeliveryPolicy.copy();
+        connectionInfo.setRedeliveryPolicy(redeliveryPolicy);
+    }
+
+    public boolean isReceiveLocalOnly() {
+        return connectionInfo.isReceiveLocalOnly();
+    }
+
+    public void setReceiveLocalOnly(boolean receiveLocalOnly) {
+        this.connectionInfo.setReceiveLocalOnly(receiveLocalOnly);
+    }
+
+    public boolean isReceiveNoWaitLocalOnly() {
+        return connectionInfo.isReceiveNoWaitLocalOnly();
+    }
+
+    public void setReceiveNoWaitLocalOnly(boolean receiveNoWaitLocalOnly) {
+        this.connectionInfo.setReceiveNoWaitLocalOnly(receiveNoWaitLocalOnly);
     }
 
     public boolean isLocalMessagePriority() {
-        return localMessagePriority;
+        return connectionInfo.isLocalMessagePriority();
     }
 
     public void setLocalMessagePriority(boolean localMessagePriority) {
-        this.localMessagePriority = localMessagePriority;
+        this.connectionInfo.setLocalMessagePriority(localMessagePriority);
     }
 
     public long getCloseTimeout() {
@@ -885,7 +949,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     public long getConnectTimeout() {
-        return this.connectionInfo.getConnectTimeout();
+        return connectionInfo.getConnectTimeout();
     }
 
     public void setConnectTimeout(long connectTimeout) {
@@ -909,19 +973,19 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     public URI getConfiguredURI() {
-        return configuredURI;
+        return connectionInfo.getConfiguredURI();
     }
 
     void setConfiguredURI(URI uri) {
-        this.configuredURI = uri;
+        connectionInfo.setConfiguredURI(uri);
     }
 
     public URI getConnectedURI() {
-        return connectedURI;
+        return connectionInfo.getConnectedURI();
     }
 
     void setConnectedURI(URI connectedURI) {
-        this.connectedURI = connectedURI;
+        connectionInfo.setConnectedURI(connectedURI);
     }
 
     public String getUsername() {
@@ -929,7 +993,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     void setUsername(String username) {
-        this.connectionInfo.setUsername(username);;
+        connectionInfo.setUsername(username);;
     }
 
     public String getPassword() {
@@ -941,11 +1005,11 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     public boolean isConnected() {
-        return this.connected.get();
+        return connected.get();
     }
 
     public boolean isStarted() {
-        return this.started.get();
+        return started.get();
     }
 
     public boolean isClosed() {
@@ -956,8 +1020,8 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
         return failed.get();
     }
 
-    public JmsConnectionId getConnectionId() {
-        return connectionInfo.getConnectionId();
+    public JmsConnectionId getId() {
+        return connectionInfo.getId();
     }
 
     public JmsMessageFactory getMessageFactory() {
@@ -968,15 +1032,31 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
     }
 
     void setMessageFactory(JmsMessageFactory factory) {
-        this.messageFactory = factory;
+        messageFactory = factory;
     }
 
     public boolean isSendAcksAsync() {
-        return sendAcksAsync;
+        return connectionInfo.isSendAcksAsync();
     }
 
     public void setSendAcksAsync(boolean sendAcksAsync) {
-        this.sendAcksAsync = sendAcksAsync;
+        connectionInfo.setSendAcksAsync(sendAcksAsync);
+    }
+
+    public boolean isLocalMessageExpiry() {
+        return connectionInfo.isLocalMessageExpiry();
+    }
+
+    public void setLocalMessageExpiry(boolean localMessageExpiry) {
+        connectionInfo.setLocalMessageExpiry(localMessageExpiry);
+    }
+
+    public JmsMessageIDBuilder getMessageIDBuilder() {
+        return messageIDBuilder;
+    }
+
+    void setMessageIDBuilder(JmsMessageIDBuilder messageIDBuilder) {
+        this.messageIDBuilder = messageIDBuilder;
     }
 
     //----- Async event handlers ---------------------------------------------//
@@ -1000,14 +1080,16 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
         // Run the application callbacks on the connection executor to allow the provider to
         // return to its normal processing without waiting for client level processing to finish.
-        for (final JmsConnectionListener listener : connectionListeners) {
-            executor.submit(new Runnable() {
+        if (!connectionListeners.isEmpty()) {
+            for (final JmsConnectionListener listener : connectionListeners) {
+                executor.submit(new Runnable() {
 
-                @Override
-                public void run() {
-                    listener.onInboundMessage(envelope);
-                }
-            });
+                    @Override
+                    public void run() {
+                        listener.onInboundMessage(envelope);
+                    }
+                });
+            }
         }
     }
 
@@ -1032,7 +1114,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
     @Override
     public void onConnectionRecovery(Provider provider) throws Exception {
-        LOG.debug("Connection {} is starting recovery.", connectionInfo.getConnectionId());
+        LOG.debug("Connection {} is starting recovery.", connectionInfo.getId());
 
         ProviderFuture request = new ProviderFuture();
         provider.create(connectionInfo, request);
@@ -1049,7 +1131,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
     @Override
     public void onConnectionRecovered(Provider provider) throws Exception {
-        LOG.debug("Connection {} is finalizing recovery.", connectionInfo.getConnectionId());
+        LOG.debug("Connection {} is finalizing recovery.", connectionInfo.getId());
 
         setMessageFactory(provider.getMessageFactory());
         setConnectedURI(provider.getRemoteURI());
@@ -1080,7 +1162,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
     @Override
     public void onConnectionEstablished(final URI remoteURI) {
-        LOG.info("Connection {} connected to remote Broker: {}", connectionInfo.getConnectionId(), remoteURI);
+        LOG.info("Connection {} connected to remote Broker: {}", connectionInfo.getId(), remoteURI);
         setMessageFactory(provider.getMessageFactory());
         setConnectedURI(provider.getRemoteURI());
 
@@ -1099,17 +1181,37 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
 
     @Override
     public void onConnectionFailure(final IOException ex) {
-        onAsyncException(ex);
+        providerFailed(ex);
+
+        onProviderException(ex);
+
+        for(AsyncResult request : requests.keySet())
+        {
+            try {
+                request.onFailure(ex);
+            } catch (Exception e) {
+                LOG.debug("Exception during request cleanup", e);
+            }
+        }
+
         if (!closing.get() && !closed.get()) {
             executor.execute(new Runnable() {
                 @Override
                 public void run() {
-                    providerFailed(ex);
                     if (provider != null) {
                         try {
                             provider.close();
                         } catch (Throwable error) {
                             LOG.debug("Error while closing failed Provider: {}", error.getMessage());
+                        }
+                    }
+
+                    for(AsyncResult request : requests.keySet())
+                    {
+                        try {
+                            request.onFailure(ex);
+                        } catch (Exception e) {
+                            LOG.debug("Exception during request cleanup", e);
                         }
                     }
 
@@ -1139,7 +1241,7 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
                 @Override
                 public void run() {
                     if (resource instanceof JmsSessionInfo) {
-                        JmsSession session = sessions.get(((JmsSessionInfo) resource).getSessionId());
+                        JmsSession session = sessions.get(resource.getId());
                         if (session != null) {
                             session.remotelyClosed(cause);
 
@@ -1167,6 +1269,13 @@ public class JmsConnection implements Connection, TopicConnection, QueueConnecti
                 }
             });
         }
+    }
+
+    @Override
+    public void onProviderException(final Exception cause) {
+        // Report this to any registered exception listener, let the receiver
+        // decide if it should be fatal.
+        onAsyncException(cause);
     }
 
     /**

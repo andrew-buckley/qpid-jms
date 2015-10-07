@@ -128,7 +128,7 @@ public interface Provider {
      * need to be started again via a call to <code>start()</code>
      *
      * For some JMS Resources it is necessary or advantageous to have a stopped state that
-     * cam be triggered to stop the resource generating new events or messages.
+     * can be triggered to stop the resource generating new events or messages.
      *
      * An example of this would be a JMS Session which should not receive any incoming messages
      * for any consumers until the JMS layer is in a state to handle them.  One such time would be
@@ -282,7 +282,13 @@ public interface Provider {
      * Request a remote peer send a Message to this client.  A message pull request is
      * usually only needed in the case where the client sets a zero prefetch limit on the
      * consumer.  If the consumer has a set prefetch that's greater than zero this method
-     * should just return without performing and action.
+     * should just return without performing any action.
+     *
+     *   {@literal timeout < 0} then it should remain open until a message is received.
+     *   {@literal timeout = 0} then it returns a message or null if none available
+     *   {@literal timeout > 0} then it should remain open for timeout amount of time.
+     *
+     * The timeout value when positive is given in milliseconds.
      *
      * @param timeout
      *        the amount of time to tell the remote peer to keep this pull request valid.

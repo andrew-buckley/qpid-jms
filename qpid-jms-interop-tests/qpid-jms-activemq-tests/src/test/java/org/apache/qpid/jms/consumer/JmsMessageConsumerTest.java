@@ -20,7 +20,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -28,10 +27,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.jms.Connection;
 import javax.jms.DeliveryMode;
-import javax.jms.ExceptionListener;
-import javax.jms.InvalidSelectorException;
-import javax.jms.JMSException;
-import javax.jms.JMSSecurityException;
 import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.MessageListener;
@@ -47,7 +42,6 @@ import org.apache.qpid.jms.JmsMessageAvailableListener;
 import org.apache.qpid.jms.JmsMessageConsumer;
 import org.apache.qpid.jms.support.AmqpTestSupport;
 import org.apache.qpid.jms.support.Wait;
-import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -93,7 +87,7 @@ public class JmsMessageConsumerTest extends AmqpTestSupport {
         final QueueViewMBean proxy = getProxyToQueue(name.getMethodName());
         assertEquals(1, proxy.getQueueSize());
 
-        assertNotNull("Failed to receive any message.", consumer.receive(2000));
+        assertNotNull("Failed to receive any message.", consumer.receive(3000));
 
         assertTrue("Queued message not consumed.", Wait.waitFor(new Wait.Condition() {
 
@@ -119,7 +113,7 @@ public class JmsMessageConsumerTest extends AmqpTestSupport {
         final TopicViewMBean proxy = getProxyToTopic(name.getMethodName());
         assertEquals(1, proxy.getEnqueueCount());
 
-        assertNotNull("Failed to receive any message.", consumer.receive(2000));
+        assertNotNull("Failed to receive any message.", consumer.receive(3000));
 
         assertTrue("Published message not consumed.", Wait.waitFor(new Wait.Condition() {
 
@@ -239,91 +233,7 @@ public class JmsMessageConsumerTest extends AmqpTestSupport {
 
         sendToAmqQueue(msgCount);
         assertTrue(done.await(1000, TimeUnit.MILLISECONDS));
-        TimeUnit.SECONDS.sleep(1);
         assertEquals(msgCount, counter.get());
-    }
-
-    @Test(timeout=60000)
-    public void testSyncReceiveFailsWhenListenerSet() throws Exception {
-        final int msgCount = 4;
-        final Connection connection = createAmqpConnection();
-        final AtomicInteger counter = new AtomicInteger(0);
-        final CountDownLatch done = new CountDownLatch(1);
-        this.connection = connection;
-
-        connection.start();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue destination = session.createQueue(name.getMethodName());
-        MessageConsumer consumer = session.createConsumer(destination);
-
-        consumer.setMessageListener(new MessageListener() {
-            @Override
-            public void onMessage(Message m) {
-                LOG.debug("Async consumer got Message: {}", m);
-                counter.incrementAndGet();
-                if (counter.get() == msgCount) {
-                    done.countDown();
-                }
-            }
-        });
-
-        try {
-            consumer.receive();
-            fail("Should have thrown an exception.");
-        } catch (JMSException ex) {
-        }
-
-        try {
-            consumer.receive(1000);
-            fail("Should have thrown an exception.");
-        } catch (JMSException ex) {
-        }
-
-        try {
-            consumer.receiveNoWait();
-            fail("Should have thrown an exception.");
-        } catch (JMSException ex) {
-        }
-    }
-
-    @Test(timeout=60000)
-    public void testSetMessageListenerAfterStartAndSend() throws Exception {
-        final int msgCount = 4;
-        final Connection connection = createAmqpConnection();
-        final AtomicInteger counter = new AtomicInteger(0);
-        final CountDownLatch done = new CountDownLatch(1);
-        this.connection = connection;
-
-        connection.start();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue destination = session.createQueue(name.getMethodName());
-        MessageConsumer consumer = session.createConsumer(destination);
-        sendToAmqQueue(msgCount);
-
-        consumer.setMessageListener(new MessageListener() {
-            @Override
-            public void onMessage(Message m) {
-                LOG.debug("Async consumer got Message: {}", m);
-                counter.incrementAndGet();
-                if (counter.get() == msgCount) {
-                    done.countDown();
-                }
-            }
-        });
-
-        assertTrue(done.await(1000, TimeUnit.MILLISECONDS));
-        TimeUnit.SECONDS.sleep(1);
-        assertEquals(msgCount, counter.get());
-    }
-
-    @Test(timeout=60000)
-    public void testNoReceivedMessagesWhenConnectionNotStarted() throws Exception {
-        connection = createAmqpConnection();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue destination = session.createQueue(name.getMethodName());
-        MessageConsumer consumer = session.createConsumer(destination);
-        sendToAmqQueue(3);
-        assertNull(consumer.receive(2000));
     }
 
     @Test(timeout = 60000)
@@ -456,29 +366,34 @@ public class JmsMessageConsumerTest extends AmqpTestSupport {
         assertNull(consumer.receive(1000));
     }
 
-    @Ignore //TODO: needs 5.12 snapshot
-    @Test(timeout=30000)
+    @Test(timeout=45000)
     public void testSelectorsWithJMSType() throws Exception {
         connection = createAmqpConnection();
         connection.start();
         Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
         Queue queue = session.createQueue(name.getMethodName());
-        MessageProducer p = session.createProducer(queue);
+        MessageProducer producer = session.createProducer(queue);
 
         TextMessage message = session.createTextMessage();
         message.setText("text");
-        p.send(message, DeliveryMode.NON_PERSISTENT, Message.DEFAULT_PRIORITY, Message.DEFAULT_TIME_TO_LIVE);
+        producer.send(message, DeliveryMode.NON_PERSISTENT, Message.DEFAULT_PRIORITY, Message.DEFAULT_TIME_TO_LIVE);
 
         TextMessage message2 = session.createTextMessage();
         String type = "myJMSType";
         message2.setJMSType(type);
         message2.setText("text + type");
-        p.send(message2, DeliveryMode.NON_PERSISTENT, Message.DEFAULT_PRIORITY, Message.DEFAULT_TIME_TO_LIVE);
+        producer.send(message2, DeliveryMode.NON_PERSISTENT, Message.DEFAULT_PRIORITY, Message.DEFAULT_TIME_TO_LIVE);
 
-        p.close();
+        producer.close();
 
-        QueueViewMBean proxy = getProxyToQueue(name.getMethodName());
-        assertEquals(2, proxy.getQueueSize());
+        final QueueViewMBean proxy = getProxyToQueue(name.getMethodName());
+        assertTrue("Queue did not get all expected messages", Wait.waitFor(new Wait.Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return proxy.getQueueSize() == 2;
+            }
+        }));
 
         MessageConsumer consumer = session.createConsumer(queue, "JMSType = '" + type + "'");
         Message msg = consumer.receive(5000);
@@ -486,158 +401,5 @@ public class JmsMessageConsumerTest extends AmqpTestSupport {
         assertTrue(msg instanceof TextMessage);
         assertEquals("Unexpected JMSType value", type, msg.getJMSType());
         assertEquals("Unexpected message content", "text + type", ((TextMessage) msg).getText());
-    }
-
-    @Test(timeout=90000, expected=JMSSecurityException.class)
-    public void testConsumerNotAuthorized() throws Exception{
-        connection = createAmqpConnection("guest", "password");
-        connection.start();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue("USERS." + name.getMethodName());
-        session.createConsumer(queue);
-    }
-
-    @Test(timeout=90000, expected=InvalidSelectorException.class)
-    public void testInvalidSelector() throws Exception{
-        connection = createAmqpConnection();
-        connection.start();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue(name.getMethodName());
-        session.createConsumer(queue, "3+5");
-    }
-
-    @Test(timeout=30000)
-    public void testConsumerReceiveNoWaitThrowsWhenBrokerStops() throws Exception {
-        final CountDownLatch consumerReady = new CountDownLatch(1);
-        final CountDownLatch connectionFailed = new CountDownLatch(1);
-
-        connection = createAmqpConnection();
-        connection.setExceptionListener(new ExceptionListener() {
-
-            @Override
-            public void onException(JMSException exception) {
-                LOG.info("Connection to Broker stopped");
-                connectionFailed.countDown();
-            }
-        });
-
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue(getDestinationName());
-        connection.start();
-
-        final MessageConsumer consumer=session.createConsumer(queue);
-        Testable test = new Testable() {
-
-            @Override
-            public synchronized void run() {
-                try {
-                    consumerReady.countDown();
-                    assertTrue("Broker connection needs to fail.", connectionFailed.await(20, TimeUnit.SECONDS));
-
-                    // Might not propagate state right away, so check a few times.
-                    for (int i = 0; i < 250; i++) {
-                        consumer.receiveNoWait();
-                        TimeUnit.MILLISECONDS.sleep(3);
-                    }
-
-                    failure = "Should have thrown an IllegalStateException";
-                } catch (Exception ex) {
-                    LOG.info("Caught exception on receiveNoWait: {}", ex);
-                }
-            }
-        };
-
-        new Thread(test).start();
-        assertTrue(consumerReady.await(20, TimeUnit.SECONDS));
-
-        stopPrimaryBroker();
-
-        assertTrue("Consumer did not fail as expected", test.passed());
-    }
-
-    @Test(timeout=30000)
-    public void testConsumerReceiveTimedReturnsIfConnectionLost() throws Exception {
-        final CountDownLatch consumerReady = new CountDownLatch(1);
-
-        connection = createAmqpConnection();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue(getDestinationName());
-        connection.start();
-
-        final MessageConsumer consumer=session.createConsumer(queue);
-
-        Testable test = new Testable() {
-            @Override
-            public synchronized void run() {
-                try {
-                    consumer.receive(1);
-                    new Thread(new Runnable() {
-
-                        @Override
-                        public void run() {
-                            try {
-                                TimeUnit.MILLISECONDS.sleep(2);
-                            } catch (InterruptedException e) {
-                            }
-                            consumerReady.countDown();
-                        }
-                    }).start();
-                    consumer.receive(TimeUnit.SECONDS.toMillis(30));
-                } catch (Exception ex) {
-                    LOG.info("Caught exception on receive(): {}", ex);
-                    failure = "Should not have thrown: " + ex.getMessage();
-                }
-            }
-        };
-
-        new Thread(test).start();
-        assertTrue(consumerReady.await(20, TimeUnit.SECONDS));
-
-        stopPrimaryBroker();
-
-        assertTrue(test.passed());
-    }
-
-    @Test(timeout=30000)
-    public void testConsumerReceiveReturnsIfConnectionLost() throws Exception {
-        final CountDownLatch consumerReady = new CountDownLatch(1);
-
-        connection = createAmqpConnection();
-        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue(getDestinationName());
-        connection.start();
-
-        final MessageConsumer consumer=session.createConsumer(queue);
-
-        Testable test = new Testable() {
-            @Override
-            public synchronized void run() {
-                try {
-                    consumer.receive(1);
-                    new Thread(new Runnable() {
-
-                        @Override
-                        public void run() {
-                            try {
-                                TimeUnit.MILLISECONDS.sleep(2);
-                            } catch (InterruptedException e) {
-                            }
-                            consumerReady.countDown();
-                        }
-                    }).start();
-                    consumer.receive();
-                } catch (Exception ex) {
-                    LOG.info("Caught exception on receive(): {}", ex);
-                    failure = "Should not have thrown: " + ex.getMessage();
-                }
-            }
-        };
-
-        new Thread(test).start();
-        assertTrue(consumerReady.await(20, TimeUnit.SECONDS));
-
-        stopPrimaryBroker();
-
-        assertTrue(test.passed());
     }
 }

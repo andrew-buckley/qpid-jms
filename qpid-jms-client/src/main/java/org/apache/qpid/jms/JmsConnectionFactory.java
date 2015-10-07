@@ -32,6 +32,7 @@ import javax.jms.TopicConnectionFactory;
 
 import org.apache.qpid.jms.exceptions.JmsExceptionSupport;
 import org.apache.qpid.jms.jndi.JNDIStorable;
+import org.apache.qpid.jms.message.JmsMessageIDBuilder;
 import org.apache.qpid.jms.meta.JmsConnectionInfo;
 import org.apache.qpid.jms.provider.Provider;
 import org.apache.qpid.jms.provider.ProviderFactory;
@@ -60,6 +61,9 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
     private boolean alwaysSyncSend;
     private boolean sendAcksAsync;
     private boolean localMessagePriority;
+    private boolean localMessageExpiry = true;
+    private boolean receiveLocalOnly;
+    private boolean receiveNoWaitLocalOnly;
     private String queuePrefix = null;
     private String topicPrefix = null;
     private boolean validatePropertyNames = true;
@@ -75,6 +79,7 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
 
     private JmsPrefetchPolicy prefetchPolicy = new JmsPrefetchPolicy();
     private JmsRedeliveryPolicy redeliveryPolicy = new JmsRedeliveryPolicy();
+    private JmsMessageIDBuilder messageIDBuilder = JmsMessageIDBuilder.BUILTIN.DEFAULT.createBuilder();
 
     public JmsConnectionFactory() {
     }
@@ -218,7 +223,6 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
 
     protected <T extends JmsConnection> T configureConnection(T connection, String username, String password) throws JMSException {
         try {
-
             Map<String, String> properties = PropertyUtil.getProperties(this);
             // We must ensure that we apply the clientID last, since setting it on
             // the Connection object provokes establishing the underlying connection.
@@ -230,10 +234,11 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
 
             PropertyUtil.setProperties(connection, properties);
             connection.setExceptionListener(exceptionListener);
+            connection.setMessageIDBuilder(messageIDBuilder);
             connection.setUsername(username);
             connection.setPassword(password);
             connection.setConfiguredURI(remoteURI);
-            if (setClientID){
+            if (setClientID) {
                 connection.setClientID(clientID);
             }
 
@@ -346,7 +351,7 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
     }
 
     /**
-     * @return the username
+     * @return the user name used for connection authentication.
      */
     public String getUsername() {
         return this.username;
@@ -354,14 +359,14 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
 
     /**
      * @param username
-     *        the username to set
+     *        the user name to set
      */
     public void setUsername(String username) {
         this.username = username;
     }
 
     /**
-     * @return the password
+     * @return the password set for connection authentication.
      */
     public String getPassword() {
         return this.password;
@@ -646,5 +651,94 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
      */
     public void setSendAcksAsync(boolean sendAcksAsync) {
         this.sendAcksAsync = sendAcksAsync;
+    }
+
+    /**
+     * @return true if MessageConsumer instance will check for expired messages locally before dispatch.
+     */
+    public boolean isLocalMessageExpiry() {
+        return localMessageExpiry;
+    }
+
+    /**
+     * Controls whether message expiration checking is done locally (in addition to any broker
+     * side checks) in each MessageConsumer prior to dispatching a message.  Disabling this check
+     * can lead to consumption of expired messages.
+     *
+     * @param localMessageExpiry
+     *        controls whether expiration checking is done prior to dispatch.
+     */
+    public void setLocalMessageExpiry(boolean localMessageExpiry) {
+        this.localMessageExpiry = localMessageExpiry;
+    }
+
+    /**
+     * Sets the type of the Message IDs used to populate the outgoing Messages
+     *
+     * @param type
+     *      The name of the Message type to use when sending a message.
+     */
+    public void setMessageIDType(String type) {
+        this.messageIDBuilder = JmsMessageIDBuilder.BUILTIN.create(type);
+    }
+
+    public String getMessageIDType() {
+        return this.messageIDBuilder.toString();
+    }
+
+    /**
+     * @return the messageIDBuilder currently configured.
+     */
+    public JmsMessageIDBuilder getMessageIDBuilder() {
+        return messageIDBuilder;
+    }
+
+    /**
+     * Allows the owner of this factory to configure a custom Message ID Builder
+     * instance that will be used to create the Message ID values set in outgoing
+     * Messages sent from MessageProducer instances.
+     *
+     * @param messageIDBuilder
+     *      The custom JmsMessageIDBuilder to use to create outgoing Message IDs.
+     */
+    public void setMessageIDBuilder(JmsMessageIDBuilder messageIDBuilder) {
+        if (messageIDBuilder == null) {
+            messageIDBuilder = JmsMessageIDBuilder.BUILTIN.DEFAULT.createBuilder();
+        }
+        this.messageIDBuilder = messageIDBuilder;
+    }
+
+    public boolean isReceiveLocalOnly() {
+        return receiveLocalOnly;
+    }
+
+    /**
+     * Controls whether the client only checks its local message buffer when using
+     * receive calls with a timeout, or will instead drain remaining credit from the
+     * remote peer to ensure there are really no messages available if the
+     * timeout expires before a message arrives in the consumers local buffer.
+     *
+     * @param receiveLocalOnly
+     *        true if receive calls with a timeout should only check the local message buffer.
+     */
+    public void setReceiveLocalOnly(boolean receiveLocalOnly) {
+        this.receiveLocalOnly = receiveLocalOnly;
+    }
+
+    public boolean isReceiveNoWaitLocalOnly() {
+        return receiveNoWaitLocalOnly;
+    }
+
+    /**
+     * Controls whether the client only checks its local message buffer when using
+     * receiveNoWait calls, or will instead drain remaining credit from the
+     * remote peer synchronously to ensure there are really no messages available
+     * that have yet to arrive in the consumers local buffer.
+     *
+     * @param receiveNoWaitLocalOnly
+     *        true if receiveNoWait calls should only check the local message buffer.
+     */
+    public void setReceiveNoWaitLocalOnly(boolean receiveNoWaitLocalOnly) {
+        this.receiveNoWaitLocalOnly = receiveNoWaitLocalOnly;
     }
 }

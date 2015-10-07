@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.jms.JMSException;
+import javax.jms.JMSSecurityException;
 
 import org.apache.qpid.jms.message.JmsInboundMessageDispatch;
 import org.apache.qpid.jms.message.JmsMessageFactory;
@@ -49,6 +50,7 @@ import org.apache.qpid.jms.provider.ProviderFactory;
 import org.apache.qpid.jms.provider.ProviderFuture;
 import org.apache.qpid.jms.provider.ProviderListener;
 import org.apache.qpid.jms.provider.ProviderRedirectedException;
+import org.apache.qpid.jms.provider.WrappedAsyncResult;
 import org.apache.qpid.jms.util.IOExceptionSupport;
 import org.apache.qpid.jms.util.ThreadPoolUtils;
 import org.slf4j.Logger;
@@ -65,9 +67,10 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
     private static final Logger LOG = LoggerFactory.getLogger(FailoverProvider.class);
 
     public static final int UNLIMITED = -1;
+    private static final int UNDEFINED = -1;
 
     public static final int DEFAULT_MAX_RECONNECT_ATTEMPTS = UNLIMITED;
-    public static final int DEFAULT_STARTUP_MAX_RECONNECT_ATTEMPTS = UNLIMITED;
+    public static final int DEFAULT_STARTUP_MAX_RECONNECT_ATTEMPTS = UNDEFINED;
     public static final long DEFAULT_INITIAL_RECONNECT_DELAY = 0;
     public static final long DEFAULT_RECONNECT_DELAY = 10;
     public static final long DEFAULT_MAX_RECONNECT_DELAY = TimeUnit.SECONDS.toMillis(30);
@@ -83,12 +86,14 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
     private final ScheduledExecutorService connectionHub;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean failed = new AtomicBoolean();
+    private final AtomicBoolean closingConnection = new AtomicBoolean(false);
     private final AtomicLong requestId = new AtomicLong();
     private final Map<Long, FailoverRequest> requests = new LinkedHashMap<Long, FailoverRequest>();
     private final DefaultProviderListener closedListener = new DefaultProviderListener();
     private final AtomicReference<JmsMessageFactory> messageFactory = new AtomicReference<JmsMessageFactory>();
 
     // Current state of connection / reconnection
+    private boolean firstAttempt = true;
     private boolean firstConnection = true;
     private long reconnectAttempts;
     private long nextReconnectDelay = -1;
@@ -287,6 +292,9 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
         final FailoverRequest pending = new FailoverRequest(request) {
             @Override
             public void doTask() throws IOException, JMSException, UnsupportedOperationException {
+                if (resourceId instanceof JmsConnectionInfo) {
+                   closingConnection.set(true);
+                }
                 provider.destroy(resourceId, this);
             }
 
@@ -497,16 +505,16 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
         LOG.debug("handling Provider failure: {}", cause.getMessage());
         LOG.trace("stack", cause);
 
-        this.provider.setProviderListener(closedListener);
+        provider.setProviderListener(closedListener);
         URI failedURI = this.provider.getRemoteURI();
         try {
-            this.provider.close();
+            provider.close();
         } catch (Throwable error) {
             LOG.trace("Caught exception while closing failed provider: {}", error.getMessage());
         }
-        this.provider = null;
+        provider = null;
 
-        if (reconnectAllowed()) {
+        if (reconnectAllowed(cause)) {
 
             if (cause instanceof ProviderRedirectedException) {
                 ProviderRedirectedException redirect = (ProviderRedirectedException) cause;
@@ -594,14 +602,16 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
      * point of view that connection was lost and an immediate attempt cycle should start.
      */
     private void triggerReconnectionAttempt() {
-        if (closed.get() || failed.get()) {
+        if (closingConnection.get() || closed.get() || failed.get()) {
             return;
         }
 
         connectionHub.execute(new Runnable() {
+            boolean delayed = false;
+
             @Override
             public void run() {
-                if (provider != null || closed.get() || failed.get()) {
+                if (provider != null || closingConnection.get() || closed.get() || failed.get()) {
                     return;
                 }
 
@@ -610,7 +620,11 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
                     return;
                 }
 
-                if (initialReconnectDelay > 0 && reconnectAttempts == 0) {
+                boolean first = firstAttempt;
+                firstAttempt = false;
+
+                if (!delayed && !first && initialReconnectDelay > 0 && reconnectAttempts == 0) {
+                    delayed = true;
                     LOG.trace("Delayed initial reconnect attempt will be in {} milliseconds", initialReconnectDelay);
                     connectionHub.schedule(this, initialReconnectDelay, TimeUnit.MILLISECONDS);
                     return;
@@ -641,7 +655,7 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
                 if (reconnectLimit != UNLIMITED && reconnectAttempts >= reconnectLimit) {
                     LOG.error("Failed to connect after: " + reconnectAttempts + " attempt(s)");
                     failed.set(true);
-                    if(failure == null) {
+                    if (failure == null) {
                         failureCause = new IOException("Failed to connect after: " + reconnectAttempts + " attempt(s)");
                     } else {
                         failureCause = IOExceptionSupport.create(failure);
@@ -665,13 +679,23 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
         });
     }
 
-    private boolean reconnectAllowed() {
+    private boolean reconnectAllowed(IOException cause) {
+        // If a connection attempts fail due to Security errors than
+        // we abort reconnection as there is a configuration issue and
+        // we want to avoid a spinning reconnect cycle that can never
+        // complete.
+        if (cause.getCause() instanceof JMSSecurityException) {
+            return false;
+        }
+
         return reconnectAttemptLimit() != 0;
     }
 
     private int reconnectAttemptLimit() {
         int maxReconnectValue = this.maxReconnectAttempts;
-        if (firstConnection && this.startupMaxReconnectAttempts != UNLIMITED) {
+        if (firstConnection && this.startupMaxReconnectAttempts != UNDEFINED) {
+            // If this is the first connection and a specific startup retry limit
+            // is configured then use it, otherwise use the main reconnect limit
             maxReconnectValue = this.startupMaxReconnectAttempts;
         }
         return maxReconnectValue;
@@ -704,30 +728,40 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
 
     @Override
     public void onInboundMessage(final JmsInboundMessageDispatch envelope) {
-        if (closed.get() || failed.get()) {
+        if (closingConnection.get() || closed.get() || failed.get()) {
+            return;
+        }
+
+        listener.onInboundMessage(envelope);
+    }
+
+    @Override
+    public void onConnectionFailure(final IOException ex) {
+        if (closingConnection.get() || closed.get() || failed.get()) {
             return;
         }
         serializer.execute(new Runnable() {
             @Override
             public void run() {
-                if (!closed.get()) {
-                    listener.onInboundMessage(envelope);
+                if (!closingConnection.get() && !closed.get() && !failed.get()) {
+                    LOG.debug("Failover: the provider reports failure: {}", ex.getMessage());
+                    handleProviderFailure(ex);
                 }
             }
         });
     }
 
     @Override
-    public void onConnectionFailure(final IOException ex) {
-        if (closed.get() || failed.get()) {
+    public void onProviderException(final Exception ex) {
+        if (closingConnection.get() || closed.get() || failed.get()) {
             return;
         }
         serializer.execute(new Runnable() {
             @Override
             public void run() {
-                if (!closed.get() && !failed.get()) {
-                    LOG.debug("Failover: the provider reports failure: {}", ex.getMessage());
-                    handleProviderFailure(ex);
+                if (!closingConnection.get() && !closed.get() && !failed.get()) {
+                    LOG.debug("Failover: the provider reports an async error: {}", ex.getMessage());
+                    listener.onProviderException(ex);
                 }
             }
         });
@@ -896,12 +930,13 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
      * Provider instance an instance of FailoverRequest is used to handle errors that
      * occur during processing of that request and trigger a reconnect.
      */
-    protected abstract class FailoverRequest extends ProviderFuture implements Runnable {
+    protected abstract class FailoverRequest extends WrappedAsyncResult implements Runnable {
 
         private final long id = requestId.incrementAndGet();
 
         public FailoverRequest(AsyncResult watcher) {
             super(watcher);
+            LOG.trace("Created Failover Task: {} ({})", this, id);
         }
 
         @Override
@@ -911,7 +946,7 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
                 whenOffline(new IOException("Connection failed."));
             } else {
                 try {
-                    LOG.debug("Executing Failover Task: {}", this);
+                    LOG.debug("Executing Failover Task: {} ({})", this, id);
                     doTask();
                 } catch (UnsupportedOperationException e) {
                     requests.remove(id);
@@ -929,7 +964,7 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
 
         @Override
         public void onFailure(final Throwable result) {
-            if (closed.get() || failed.get()) {
+            if (result instanceof JMSException || closingConnection.get() || closed.get() || failed.get()) {
                 requests.remove(id);
                 super.onFailure(result);
             } else {
@@ -981,7 +1016,7 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
             } else if (succeedsWhenOffline()) {
                 onSuccess();
             } else {
-                LOG.trace("Task {} held until connection recovered:", this);
+                LOG.trace("Failover task held until connection recovered: {} ({})", this, id);
             }
         }
     }

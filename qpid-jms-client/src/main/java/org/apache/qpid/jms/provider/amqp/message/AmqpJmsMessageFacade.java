@@ -332,7 +332,7 @@ public class AmqpJmsMessageFacade implements JmsMessageFacade {
     }
 
     @Override
-    public String getMessageId() {
+    public Object getMessageId() {
         Object underlying = message.getMessageId();
         AmqpMessageIdHelper helper = AmqpMessageIdHelper.INSTANCE;
         String baseStringId = helper.toBaseMessageIdString(underlying);
@@ -342,6 +342,7 @@ public class AmqpJmsMessageFacade implements JmsMessageFacade {
         if (baseStringId != null && !helper.hasMessageIdPrefix(baseStringId)) {
             baseStringId = AmqpMessageIdHelper.JMS_ID_PREFIX + baseStringId;
         }
+
         return baseStringId;
     }
 
@@ -351,13 +352,17 @@ public class AmqpJmsMessageFacade implements JmsMessageFacade {
     }
 
     @Override
-    public void setMessageId(String messageId) {
+    public void setMessageId(Object messageId) {
         if (messageId == null) {
             message.setMessageId(null);
         } else {
-            // Remove the first 'ID:' prefix if present
-            String stripped = AmqpMessageIdHelper.INSTANCE.stripMessageIdPrefix(messageId);
-            message.setMessageId(stripped);
+            if (messageId instanceof String) {
+                // Remove the first 'ID:' prefix if present
+                String stripped = AmqpMessageIdHelper.INSTANCE.stripMessageIdPrefix((String) messageId);
+                message.setMessageId(stripped);
+            } else {
+                message.setMessageId(messageId);
+            }
         }
     }
 
@@ -480,14 +485,6 @@ public class AmqpJmsMessageFacade implements JmsMessageFacade {
     public void setDeliveryCount(int deliveryCount) {
         setRedeliveryCount(deliveryCount - 1);
     }
-
-    // TODO - We can probably remove these set / get redelivery count and just use
-    //        the delivery count and is / set redelivered bits for the JMS mapping.
-    //
-    // possibly add an increment to make the consumer code more readable when doing
-    // a recover or rollback if we do local redeliveries.
-    //
-    //  public void incrementRedeliveryCount()
 
     @Override
     public int getRedeliveryCount() {

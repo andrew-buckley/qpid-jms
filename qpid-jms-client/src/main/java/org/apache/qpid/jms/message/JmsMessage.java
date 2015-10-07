@@ -66,7 +66,7 @@ public class JmsMessage implements JmsAmqpMessage
 
     @Override
     public int hashCode() {
-        String id = facade.getMessageId();
+        Object id = facade.getMessageId();
 
         if (id != null) {
             return id.hashCode();
@@ -85,8 +85,8 @@ public class JmsMessage implements JmsAmqpMessage
         }
 
         JmsMessage msg = (JmsMessage) o;
-        String oMsg = msg.facade.getMessageId();
-        String thisMsg = facade.getMessageId();
+        Object oMsg = msg.facade.getMessageId();
+        Object thisMsg = facade.getMessageId();
 
         return thisMsg != null && oMsg != null && oMsg.equals(thisMsg);
     }
@@ -145,12 +145,12 @@ public class JmsMessage implements JmsAmqpMessage
 
     @Override
     public String getJMSMessageID() throws JMSException {
-        String value = facade.getMessageId();
-        if (value != null && !value.startsWith(ID_PREFIX)) {
+        Object value = facade.getMessageId();
+        if (value != null && !value.toString().startsWith(ID_PREFIX)) {
             value = ID_PREFIX + value;
         }
 
-        return value;
+        return value == null ? null : value.toString();
     }
 
     @Override
@@ -532,6 +532,11 @@ public class JmsMessage implements JmsAmqpMessage
 
     public JmsMessageFacade getFacade() {
         return this.facade;
+    }
+
+    public boolean isExpired() {
+        long expireTime = facade.getExpiration();
+        return expireTime > 0 && System.currentTimeMillis() > expireTime;
     }
 
     @Override

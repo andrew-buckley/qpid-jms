@@ -18,13 +18,13 @@
   <parent>
     <groupId>org.apache</groupId>
     <artifactId>apache</artifactId>
-    <version>16</version>
+    <version>17</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>org.apache.qpid</groupId>
   <artifactId>qpid-jms-parent</artifactId>
-  <version>0.4.0-SNAPSHOT</version>
+  <version>0.6.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>QpidJMS</name>
   <inceptionYear>2013</inceptionYear>
@@ -43,23 +43,23 @@
     <target-version>1.7</target-version>
 
     <!-- Dependency Versions for this Project -->
-    <proton-version>0.10-SNAPSHOT</proton-version>
+    <proton-version>0.10</proton-version>
     <netty-version>4.0.17.Final</netty-version>
     <slf4j-version>1.7.12</slf4j-version>
     <geronimo-jms-1-1-spec-version>1.1.1</geronimo-jms-1-1-spec-version>
     <!-- Test Dependency Versions for this Project -->
-    <activemq-version>5.11.1</activemq-version>
+    <activemq-version>5.12.0</activemq-version>
     <junit-version>4.12</junit-version>
     <fuse-joram-tests-version>1.0</fuse-joram-tests-version>
-    <jetty-version>8.1.16.v20140903</jetty-version>
+    <jetty-version>8.1.17.v20150415</jetty-version>
     <mockito-version>1.10.19</mockito-version>
     <hamcrest-version>1.3</hamcrest-version>
 
     <!-- Maven Plugin Versions for this Project -->
     <maven-javacc-plugin-version>2.6</maven-javacc-plugin-version>
-    <maven-eclipse-plugin-version>2.9</maven-eclipse-plugin-version>
+    <maven-eclipse-plugin-version>2.10</maven-eclipse-plugin-version>
     <maven-idea-plugin-version>2.5</maven-idea-plugin-version>
-    <findbugs-maven-plugin-version>3.0.0</findbugs-maven-plugin-version>
+    <findbugs-maven-plugin-version>3.0.2</findbugs-maven-plugin-version>
     <jacoco-plugin-version>0.7.5.201505241946</jacoco-plugin-version>
 
     <!-- Test properties -->

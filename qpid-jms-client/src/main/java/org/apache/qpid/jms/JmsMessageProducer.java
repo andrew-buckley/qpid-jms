@@ -33,7 +33,7 @@ import org.apache.qpid.jms.provider.Provider;
 import org.apache.qpid.jms.provider.ProviderFuture;
 
 /**
- * Implementation of a Jms MessageProducer
+ * Implementation of a JMS MessageProducer
  */
 public class JmsMessageProducer implements MessageProducer {
 
@@ -298,7 +298,7 @@ public class JmsMessageProducer implements MessageProducer {
      * @return the producer's assigned JmsProducerId.
      */
     protected JmsProducerId getProducerId() {
-        return this.producerInfo.getProducerId();
+        return this.producerInfo.getId();
     }
 
     /**

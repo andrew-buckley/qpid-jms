@@ -23,28 +23,23 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 
-import javax.jms.InvalidDestinationException;
 import javax.jms.JMSException;
 
-import org.apache.qpid.jms.JmsDestination;
 import org.apache.qpid.jms.message.JmsOutboundMessageDispatch;
 import org.apache.qpid.jms.message.facade.JmsMessageFacade;
 import org.apache.qpid.jms.meta.JmsProducerInfo;
 import org.apache.qpid.jms.provider.AsyncResult;
-import org.apache.qpid.jms.provider.amqp.message.AmqpDestinationHelper;
 import org.apache.qpid.jms.provider.amqp.message.AmqpJmsMessageFacade;
 import org.apache.qpid.jms.util.IOExceptionSupport;
 import org.apache.qpid.proton.amqp.Binary;
-import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
+import org.apache.qpid.proton.amqp.messaging.Modified;
 import org.apache.qpid.proton.amqp.messaging.Outcome;
 import org.apache.qpid.proton.amqp.messaging.Rejected;
-import org.apache.qpid.proton.amqp.messaging.Source;
-import org.apache.qpid.proton.amqp.messaging.Target;
+import org.apache.qpid.proton.amqp.messaging.Released;
 import org.apache.qpid.proton.amqp.transaction.TransactionalState;
 import org.apache.qpid.proton.amqp.transport.DeliveryState;
-import org.apache.qpid.proton.amqp.transport.ReceiverSettleMode;
-import org.apache.qpid.proton.amqp.transport.SenderSettleMode;
+import org.apache.qpid.proton.amqp.transport.ErrorCondition;
 import org.apache.qpid.proton.engine.Delivery;
 import org.apache.qpid.proton.engine.Sender;
 import org.apache.qpid.proton.message.Message;
@@ -71,6 +66,10 @@ public class AmqpFixedProducer extends AmqpProducer {
         super(session, info);
     }
 
+    public AmqpFixedProducer(AmqpSession session, JmsProducerInfo info, Sender sender) {
+        super(session, info, sender);
+    }
+
     @Override
     public void close(AsyncResult request) {
         // If any sends are held we need to wait for them to complete.
@@ -84,7 +83,6 @@ public class AmqpFixedProducer extends AmqpProducer {
 
     @Override
     public boolean send(JmsOutboundMessageDispatch envelope, AsyncResult request) throws IOException, JMSException {
-
         // TODO - Handle the case where remote has no credit which means we can't send to it.
         //        We need to hold the send until remote credit becomes available but we should
         //        also have a send timeout option and filter timed out sends.
@@ -210,27 +208,38 @@ public class AmqpFixedProducer extends AmqpProducer {
             }
 
             AsyncResult request = (AsyncResult) delivery.getContext();
+            Exception deliveryError = null;
 
             if (outcome instanceof Accepted) {
                 LOG.trace("Outcome of delivery was accepted: {}", delivery);
-                tagGenerator.returnTag(delivery.getTag());
                 if (request != null && !request.isComplete()) {
                     request.onSuccess();
                 }
             } else if (outcome instanceof Rejected) {
-                Exception remoteError = getRemoteError();
                 LOG.trace("Outcome of delivery was rejected: {}", delivery);
-                tagGenerator.returnTag(delivery.getTag());
-                if (request != null && !request.isComplete()) {
-                    request.onFailure(remoteError);
-                } else {
-                    connection.getProvider().fireProviderException(remoteError);
+                ErrorCondition remoteError = ((Rejected) outcome).getError();
+                if (remoteError == null) {
+                    remoteError = getEndpoint().getRemoteCondition();
                 }
-            } else if (outcome != null) {
-                // TODO - Revisit these and better handle unknown or other outcomes
-                LOG.warn("Message send updated with unsupported outcome: {}", outcome);
+
+                deliveryError = AmqpSupport.convertToException(remoteError);
+            } else if (outcome instanceof Released) {
+                LOG.trace("Outcome of delivery was released: {}", delivery);
+                deliveryError = new JMSException("Delivery failed: released by receiver");
+            } else if (outcome instanceof Modified) {
+                LOG.trace("Outcome of delivery was modified: {}", delivery);
+                deliveryError = new JMSException("Delivery failed: failure at remote");
             }
 
+            if (deliveryError != null) {
+                if (request != null && !request.isComplete()) {
+                    request.onFailure(deliveryError);
+                } else {
+                    connection.getProvider().fireNonFatalProviderException(deliveryError);
+                }
+            }
+
+            tagGenerator.returnTag(delivery.getTag());
             toRemove.add(delivery);
             delivery.settle();
         }
@@ -240,76 +249,13 @@ public class AmqpFixedProducer extends AmqpProducer {
         super.processDeliveryUpdates(provider);
     }
 
-    @Override
-    protected void doOpen() {
-        JmsDestination destination = resource.getDestination();
-        String targetAddress = AmqpDestinationHelper.INSTANCE.getDestinationAddress(destination, session.getConnection());
-
-        Symbol[] outcomes = new Symbol[]{ Accepted.DESCRIPTOR_SYMBOL, Rejected.DESCRIPTOR_SYMBOL };
-        String sourceAddress = getProducerId().toString();
-        Source source = new Source();
-        source.setAddress(sourceAddress);
-        source.setOutcomes(outcomes);
-        //TODO: default outcome. Accepted normally, Rejected for transaction controller?
-
-        Target target = new Target();
-        target.setAddress(targetAddress);
-        Symbol typeCapability =  AmqpDestinationHelper.INSTANCE.toTypeCapability(destination);
-        if(typeCapability != null) {
-            target.setCapabilities(typeCapability);
-        }
-
-        String senderName = "qpid-jms:sender:" + sourceAddress + ":" + targetAddress;
-
-        Sender sender = session.getProtonSession().sender(senderName);
-        sender.setSource(source);
-        sender.setTarget(target);
-        if (presettle) {
-            sender.setSenderSettleMode(SenderSettleMode.SETTLED);
-        } else {
-            sender.setSenderSettleMode(SenderSettleMode.UNSETTLED);
-        }
-        sender.setReceiverSettleMode(ReceiverSettleMode.FIRST);
-
-        setEndpoint(sender);
-
-        super.doOpen();
-    }
-
-    @Override
-    protected void doOpenCompletion() {
-        // Verify the attach response contained a non-null target
-        org.apache.qpid.proton.amqp.transport.Target t = getEndpoint().getRemoteTarget();
-        if (t != null) {
-            super.doOpenCompletion();
-        } else {
-            // No link terminus was created, the peer will now detach/close us.
-        }
-    }
-
-    @Override
-    protected Exception getOpenAbortException() {
-        // Verify the attach response contained a non-null target
-        org.apache.qpid.proton.amqp.transport.Target t = getEndpoint().getRemoteTarget();
-        if (t != null) {
-            return super.getOpenAbortException();
-        } else {
-            // No link terminus was created, the peer has detach/closed us, create IDE.
-            return new InvalidDestinationException("Link creation was refused");
-        }
-    }
-
     public AmqpSession getSession() {
-        return this.session;
-    }
-
-    public Sender getProtonSender() {
-        return this.getEndpoint();
+        return session;
     }
 
     @Override
     public boolean isAnonymous() {
-        return this.resource.getDestination() == null;
+        return getResourceInfo().getDestination() == null;
     }
 
     @Override
@@ -319,7 +265,7 @@ public class AmqpFixedProducer extends AmqpProducer {
 
     @Override
     public boolean isPresettle() {
-        return this.presettle;
+        return presettle;
     }
 
     @Override
@@ -336,5 +282,33 @@ public class AmqpFixedProducer extends AmqpProducer {
             this.envelope = envelope;
             this.request = request;
         }
+    }
+
+    @Override
+    public void remotelyClosed(AmqpProvider provider) {
+        super.remotelyClosed(provider);
+
+        Exception ex = AmqpSupport.convertToException(getEndpoint().getRemoteCondition());
+        if (ex == null) {
+            // TODO: create/use a more specific/appropriate exception type?
+            ex = new JMSException("Producer closed remotely before message transfer result was notified");
+        }
+
+        for (Delivery delivery : pending) {
+            try {
+                AsyncResult request = (AsyncResult) delivery.getContext();
+
+                if (request != null && !request.isComplete()) {
+                    request.onFailure(ex);
+                }
+
+                delivery.settle();
+                tagGenerator.returnTag(delivery.getTag());
+            } catch (Exception e) {
+                LOG.debug("Caught exception when failing pending send during remote producer closure: {}", delivery, e);
+            }
+        }
+
+        pending.clear();
     }
 }

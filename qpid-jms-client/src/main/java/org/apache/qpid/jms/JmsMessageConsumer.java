@@ -19,6 +19,7 @@ package org.apache.qpid.jms;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -41,11 +42,15 @@ import org.apache.qpid.jms.provider.ProviderFuture;
 import org.apache.qpid.jms.util.FifoMessageQueue;
 import org.apache.qpid.jms.util.MessageQueue;
 import org.apache.qpid.jms.util.PriorityMessageQueue;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * implementation of a JMS Message Consumer
  */
 public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableConsumer, JmsMessageDispatcher {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JmsMessageConsumer.class);
 
     protected final JmsSession session;
     protected final JmsConnection connection;
@@ -59,7 +64,7 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
     protected final Lock lock = new ReentrantLock();
     protected final AtomicBoolean suspendedConnection = new AtomicBoolean();
     protected final AtomicBoolean delivered = new AtomicBoolean();
-    protected Exception failureCause;
+    protected final AtomicReference<Exception> failureCause = new AtomicReference<>();
 
     /**
      * Create a non-durable MessageConsumer
@@ -116,6 +121,7 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
         consumerInfo.setBrowser(isBrowser());
         consumerInfo.setPrefetchSize(getConfiguredPrefetch(destination, policy));
         consumerInfo.setRedeliveryPolicy(redeliveryPolicy);
+        consumerInfo.setLocalMessageExpiry(connection.isLocalMessageExpiry());
 
         session.getConnection().createResource(consumerInfo);
     }
@@ -145,7 +151,7 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
 
                 @Override
                 public boolean validate(JmsTransactionContext context) throws Exception {
-                    if (!context.isInTransaction() || !delivered.get()) {
+                    if (!context.isInTransaction() || !delivered.get() || isBrowser()) {
                         doClose();
                         return false;
                     }
@@ -190,7 +196,7 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
 
     protected void shutdown(Exception cause) throws JMSException {
         if (closed.compareAndSet(false, true)) {
-            failureCause = cause;
+            failureCause.set(cause);
             session.remove(this);
             stop(true);
         }
@@ -216,18 +222,13 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
     public Message receive(long timeout) throws JMSException {
         checkClosed();
         checkMessageListener();
-        sendPullCommand(timeout);
 
-        long wait = timeout;
+        // Configure for infinite wait when timeout is zero (JMS Spec)
         if (timeout == 0) {
-            wait = -1;
+            timeout = -1;
         }
 
-        try {
-            return copy(ackFromReceive(this.messageQueue.dequeue(wait)));
-        } catch (InterruptedException e) {
-            throw JmsExceptionSupport.create(e);
-        }
+        return copy(ackFromReceive(dequeue(timeout, connection.isReceiveLocalOnly())));
     }
 
     /**
@@ -239,20 +240,129 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
     public Message receiveNoWait() throws JMSException {
         checkClosed();
         checkMessageListener();
-        sendPullCommand(-1);
 
-        return copy(ackFromReceive(this.messageQueue.dequeueNoWait()));
+        return copy(ackFromReceive(dequeue(0, connection.isReceiveNoWaitLocalOnly())));
+    }
+
+    /**
+     * Used to get an enqueued message from the unconsumedMessages list. The
+     * amount of time this method blocks is based on the timeout value.
+     *
+     *   timeout < 0 then it blocks until a message is received.
+     *   timeout = 0 then it returns a message or null if none available
+     *   timeout > 0 then it blocks up to timeout amount of time.
+     *
+     * This method may consume messages that are expired or exceed a configured
+     * delivery count value but will continue to wait for the configured timeout.
+     * @param localCheckOnly
+     *          if false, try pulling a message if a >= 0 timeout expires with no message arriving
+     * @throws JMSException
+     * @return null if we timeout or if the consumer is closed concurrently.
+     */
+    private JmsInboundMessageDispatch dequeue(long timeout, boolean localCheckOnly) throws JMSException {
+        boolean pullConsumer = isPullConsumer();
+        boolean pullForced = pullConsumer;
+
+        try {
+            long deadline = 0;
+            if (timeout > 0) {
+                deadline = System.currentTimeMillis() + timeout;
+            }
+
+            performPullIfRequired(timeout, false);
+
+            while (true) {
+                JmsInboundMessageDispatch envelope = null;
+                if (pullForced || pullConsumer) {
+                    // Any waiting was done by the pull request, try immediate retrieval from the queue.
+                    envelope = messageQueue.dequeue(0);
+                } else {
+                    envelope = messageQueue.dequeue(timeout);
+                }
+
+                if (failureCause.get() != null) {
+                    LOG.debug("{} receive failed: {}", getConsumerId(), failureCause.get().getMessage());
+                    throw JmsExceptionSupport.create(failureCause.get());
+                }
+
+                if (envelope == null) {
+                    if ((timeout == 0 && (pullForced || localCheckOnly)) || pullConsumer || messageQueue.isClosed()) {
+                        return null;
+                    } else if (timeout > 0) {
+                        timeout = Math.max(deadline - System.currentTimeMillis(), 0);
+                    }
+
+                    if (timeout >= 0 && !localCheckOnly) {
+                        // We don't do this for receive with no timeout since it
+                        // is redundant: zero-prefetch consumers already pull, and
+                        // the rest block indefinitely on the local messageQueue.
+                        pullForced = true;
+                        if(performPullIfRequired(timeout, true)) {
+                            startConsumerResource();
+                            // We refresh credit if it is a prefetching consumer, since the
+                            // pull drained it. Processing acks can open the credit window, but
+                            // not in all cases, and if we didn't get a message it would stay
+                            // closed until future pulls were performed.
+                        }
+                    }
+
+                } else if (envelope.getMessage() == null) {
+                    //TODO: do we still need this now?
+                    LOG.trace("{} no message was available for this consumer: {}", getConsumerId());
+                    return null;
+                } else if (consumeExpiredMessage(envelope)) {
+                    LOG.trace("{} filtered expired message: {}", getConsumerId(), envelope);
+                    doAckExpired(envelope);
+                    if (timeout > 0) {
+                        timeout = Math.max(deadline - System.currentTimeMillis(), 0);
+                    }
+                    performPullIfRequired(timeout, false);
+                } else if (redeliveryExceeded(envelope)) {
+                    LOG.debug("{} filtered message with excessive redelivery count: {}", getConsumerId(), envelope);
+                    doAckUndeliverable(envelope);
+                    if (timeout > 0) {
+                        timeout = Math.max(deadline - System.currentTimeMillis(), 0);
+                    }
+                    performPullIfRequired(timeout, false);
+                } else {
+                    if (LOG.isTraceEnabled()) {
+                        LOG.trace(getConsumerId() + " received message: " + envelope);
+                    }
+                    return envelope;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw JmsExceptionSupport.create(e);
+        }
+    }
+
+    private boolean consumeExpiredMessage(JmsInboundMessageDispatch dispatch) {
+        if (!isBrowser() && consumerInfo.isLocalMessageExpiry() && dispatch.getMessage().isExpired()) {
+            return true;
+        }
+
+        return false;
+    }
+
+    protected boolean redeliveryExceeded(JmsInboundMessageDispatch envelope) {
+        LOG.trace("checking envelope with {} redeliveries", envelope.getRedeliveryCount());
+
+        JmsRedeliveryPolicy redeliveryPolicy = consumerInfo.getRedeliveryPolicy();
+        return redeliveryPolicy != null &&
+               redeliveryPolicy.getMaxRedeliveries() != JmsRedeliveryPolicy.DEFAULT_MAX_REDELIVERIES &&
+               redeliveryPolicy.getMaxRedeliveries() < envelope.getRedeliveryCount();
     }
 
     protected void checkClosed() throws IllegalStateException {
         if (closed.get()) {
             IllegalStateException jmsEx = null;
 
-            if (failureCause == null) {
+            if (failureCause.get() == null) {
                 jmsEx = new IllegalStateException("The MessageConsumer is closed");
             } else {
                 jmsEx = new IllegalStateException("The MessageConsumer was closed due to an unrecoverable error.");
-                jmsEx.initCause(failureCause);
+                jmsEx.initCause(failureCause.get());
             }
 
             throw jmsEx;
@@ -302,6 +412,24 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
             throw ex;
         }
         return envelope;
+    }
+
+    private void doAckExpired(final JmsInboundMessageDispatch envelope) throws JMSException {
+        try {
+            session.acknowledge(envelope, ACK_TYPE.EXPIRED);
+        } catch (JMSException ex) {
+            session.onException(ex);
+            throw ex;
+        }
+    }
+
+    private void doAckUndeliverable(final JmsInboundMessageDispatch envelope) throws JMSException {
+        try {
+            session.acknowledge(envelope, ACK_TYPE.POISONED);
+        } catch (JMSException ex) {
+            session.onException(ex);
+            throw ex;
+        }
     }
 
     private void doAckReleased(final JmsInboundMessageDispatch envelope) throws JMSException {
@@ -421,7 +549,7 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
      * @return the id
      */
     public JmsConsumerId getConsumerId() {
-        return this.consumerInfo.getConsumerId();
+        return this.consumerInfo.getId();
     }
 
     /**
@@ -500,6 +628,10 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
         return false;
     }
 
+    public boolean isPullConsumer() {
+        return getPrefetchSize() == 0;
+    }
+
     @Override
     public void setAvailableListener(JmsMessageAvailableListener availableListener) {
         this.availableListener = availableListener;
@@ -530,23 +662,29 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
     }
 
     /**
-     * Triggers a pull request from the connected Provider.  An attempt is made to set
-     * a timeout on the pull request however some providers will not honor this value
-     * and the pull will remain active until a message is dispatched.
+     * Triggers a pull request from the connected Provider with the given timeout value
+     * if the consumer is a pull consumer or requested to be treated as one, and the
+     * local queue is still running, and is currently empty.
      * <p>
      * The timeout value can be one of:
      * <br>
-     * {@literal < 0} to indicate that the request should expire immediately if no message.<br>
-     * {@literal = 0} to indicate that the request should never time out.<br>
-     * {@literal > 1} to indicate that the request should expire after the given time in milliseconds.
+     * {@literal < 0} to indicate that the request should never time out.<br>
+     * {@literal = 0} to indicate that the request should expire immediately if no message.<br>
+     * {@literal > 0} to indicate that the request should expire after the given time in milliseconds.
      *
      * @param timeout
      *        The amount of time the pull request should remain valid.
+     * @param treatAsPullConsumer
+     *        Treat the consumer as if it were a pull consumer, even if it isn't.
+     * @return true if a pull was performed, false if it was not.
      */
-    protected void sendPullCommand(long timeout) throws JMSException {
-        if (messageQueue.isEmpty() && (getPrefetchSize() == 0 || isBrowser())) {
+    protected boolean performPullIfRequired(long timeout, boolean treatAsPullConsumer) throws JMSException {
+        if ((isPullConsumer() || treatAsPullConsumer) && messageQueue.isRunning() && messageQueue.isEmpty()) {
             connection.pull(getConsumerId(), timeout);
+            return true;
         }
+
+        return false;
     }
 
     private int getConfiguredPrefetch(JmsDestination destination, JmsPrefetchPolicy policy) {
@@ -575,19 +713,37 @@ public class JmsMessageConsumer implements MessageConsumer, JmsMessageAvailableC
             while (session.isStarted() && (envelope = messageQueue.dequeueNoWait()) != null) {
                 try {
                     JmsMessage copy = null;
-                    boolean autoAckOrDupsOk = acknowledgementMode == Session.AUTO_ACKNOWLEDGE ||
-                                              acknowledgementMode == Session.DUPS_OK_ACKNOWLEDGE;
-                    if (autoAckOrDupsOk) {
-                        copy = copy(doAckDelivered(envelope));
+
+                    if (consumeExpiredMessage(envelope)) {
+                        LOG.trace("{} filtered expired message: {}", getConsumerId(), envelope);
+                        doAckExpired(envelope);
+                    } else if (redeliveryExceeded(envelope)) {
+                        LOG.trace("{} filtered message with excessive redelivery count: {}", getConsumerId(), envelope);
+                        doAckUndeliverable(envelope);
                     } else {
-                        copy = copy(ackFromReceive(envelope));
-                    }
-                    session.clearSessionRecovered();
+                        boolean deliveryFailed = false;
+                        boolean autoAckOrDupsOk = acknowledgementMode == Session.AUTO_ACKNOWLEDGE ||
+                                                  acknowledgementMode == Session.DUPS_OK_ACKNOWLEDGE;
+                        if (autoAckOrDupsOk) {
+                            copy = copy(doAckDelivered(envelope));
+                        } else {
+                            copy = copy(ackFromReceive(envelope));
+                        }
+                        session.clearSessionRecovered();
 
-                    messageListener.onMessage(copy);
+                        try {
+                            messageListener.onMessage(copy);
+                        } catch (RuntimeException rte) {
+                            deliveryFailed = true;
+                        }
 
-                    if (autoAckOrDupsOk && !session.isSessionRecovered()) {
-                        doAckConsumed(envelope);
+                        if (autoAckOrDupsOk && !session.isSessionRecovered()) {
+                            if (!deliveryFailed) {
+                                doAckConsumed(envelope);
+                            } else {
+                                doAckReleased(envelope);
+                            }
+                        }
                     }
                 } catch (Exception e) {
                     // TODO - We need to handle exception of on message with some other

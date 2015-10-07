@@ -32,15 +32,20 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.jms.Connection;
 import javax.jms.Destination;
 import javax.jms.IllegalStateException;
 import javax.jms.InvalidDestinationException;
+import javax.jms.InvalidSelectorException;
 import javax.jms.JMSException;
 import javax.jms.JMSSecurityException;
 import javax.jms.Message;
 import javax.jms.MessageConsumer;
+import javax.jms.MessageListener;
 import javax.jms.MessageProducer;
 import javax.jms.Queue;
 import javax.jms.Session;
@@ -51,6 +56,7 @@ import javax.jms.Topic;
 import javax.jms.TopicSubscriber;
 
 import org.apache.qpid.jms.JmsConnection;
+import org.apache.qpid.jms.JmsPrefetchPolicy;
 import org.apache.qpid.jms.provider.amqp.message.AmqpDestinationHelper;
 import org.apache.qpid.jms.test.QpidJmsTestCase;
 import org.apache.qpid.jms.test.Wait;
@@ -82,8 +88,12 @@ import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.amqp.UnsignedInteger;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class SessionIntegrationTest extends QpidJmsTestCase {
+    private static final Logger LOG = LoggerFactory.getLogger(SessionIntegrationTest.class);
+
     private final IntegrationTestFixture testFixture = new IntegrationTestFixture();
 
     @Test(timeout = 20000)
@@ -94,6 +104,9 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
             assertNotNull("Session should not be null", session);
             testPeer.expectEnd();
+            session.close();
+
+            // Should send nothing and throw no error.
             session.close();
         }
     }
@@ -193,7 +206,7 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             try {
                 //Create a consumer, expect it to throw exception due to the link-refusal
                 session.createConsumer(dest);
-                fail("Producer creation should have failed when link was refused");
+                fail("Consumer creation should have failed when link was refused");
             } catch(InvalidDestinationException ide) {
                 //Expected
             }
@@ -399,6 +412,78 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
     }
 
     @Test(timeout = 20000)
+    public void testConsumerNotAuthorized() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+
+            String topicName = "myTopic";
+            Topic destination = session.createTopic(topicName);
+
+            testPeer.expectReceiverAttach(notNullValue(), notNullValue(), false, true, false, AmqpError.UNAUTHORIZED_ACCESS, "Destination is not readable");
+            testPeer.expectDetach(true, true, true);
+
+            try {
+                session.createConsumer(destination);
+                fail("Should have thrown a security exception");
+            } catch (JMSSecurityException jmsse) {
+            }
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testProducerNotAuthorized() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+
+            String topicName = "myTopic";
+            Topic destination = session.createTopic(topicName);
+
+            testPeer.expectSenderAttach(notNullValue(), notNullValue(), true, true, 0L, AmqpError.UNAUTHORIZED_ACCESS, "Destination is not readable");
+            testPeer.expectDetach(true, true, true);
+
+            try {
+                session.createProducer(destination);
+                fail("Should have thrown a security exception");
+            } catch (JMSSecurityException jmsse) {
+            }
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testInvalidSelector() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+
+            String topicName = "myTopic";
+            Topic destination = session.createTopic(topicName);
+
+            try {
+                session.createConsumer(destination, "3+5");
+                fail("Should have thrown a invalid selector exception");
+            } catch (InvalidSelectorException jmsse) {
+            }
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test(timeout = 20000)
     public void testCreateProducerTargetContainsQueueCapability() throws Exception {
         doCreateProducerTargetContainsCapabilityTestImpl(Queue.class);
     }
@@ -591,6 +676,39 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             assertNotNull("TopicSubscriber object was null", subscriber);
             assertFalse("TopicSubscriber should not be no-local", subscriber.getNoLocal());
             assertNull("TopicSubscriber should not have a selector", subscriber.getMessageSelector());
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testDurableSubscriptionUnsubscribeInUseThrowsJMSEx() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+
+            String topicName = "myTopic";
+            Topic dest = session.createTopic(topicName);
+            String subscriptionName = "mySubscription";
+
+            testPeer.expectDurableSubscriberAttach(topicName, subscriptionName);
+            testPeer.expectLinkFlow();
+
+            TopicSubscriber subscriber = session.createDurableSubscriber(dest, subscriptionName);
+            assertNotNull("TopicSubscriber object was null", subscriber);
+
+            try {
+                session.unsubscribe(subscriptionName);
+                fail("Should have thrown a JMSException");
+            } catch (JMSException ex) {
+            }
+
+            testPeer.expectDetach(false, true, false);
+
+            subscriber.close();
 
             testPeer.waitForAllHandlersToComplete(1000);
         }
@@ -877,7 +995,7 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             MessageConsumer messageConsumer = session.createConsumer(queue);
 
             for (int i = 1; i <= consumeCount; i++) {
-                Message receivedMessage = messageConsumer.receive(1000);
+                Message receivedMessage = messageConsumer.receive(3000);
 
                 assertNotNull(receivedMessage);
                 assertTrue(receivedMessage instanceof TextMessage);
@@ -917,7 +1035,11 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             header.setDeliveryCount(new UnsignedInteger(2));
 
             testPeer.expectReceiverAttach();
-            testPeer.expectLinkFlowRespondWithTransfer(header, null, null, null, new AmqpValueDescribedType("content"), COUNT);
+            // Send some messages that have exceeded the specified re-delivery count
+            testPeer.expectLinkFlowRespondWithTransfer(header, null, null, null, new AmqpValueDescribedType("redelivered-content"), COUNT);
+            // Send a message that has not exceeded the delivery count
+            String expectedContent = "not-redelivered";
+            testPeer.sendTransferToLastOpenedLinkOnLastOpenedSession(null, null, null, null, new AmqpValueDescribedType(expectedContent), COUNT + 1);
 
             for (int i = 0; i < COUNT; i++) {
                 // Then expect an *settled* Modified disposition that rejects each message once
@@ -927,9 +1049,17 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
                 testPeer.expectDisposition(true, modified);
             }
 
-            session.createConsumer(queue);
+            // Then expect an Accepted disposition for the good message
+            testPeer.expectDisposition(true, new AcceptedMatcher());
 
-            testPeer.waitForAllHandlersToComplete(1000);
+            final MessageConsumer consumer = session.createConsumer(queue);
+
+            Message m = consumer.receive(6000);
+            assertNotNull("Should have reiceved the final message", m);
+            assertTrue("Should have received the final message", m instanceof TextMessage);
+            assertEquals("Unexpected content", expectedContent, ((TextMessage)m).getText());
+
+            testPeer.waitForAllHandlersToComplete(2000);
         }
     }
 
@@ -1024,7 +1154,7 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             MessageConsumer messageConsumer = session.createConsumer(queue);
 
             for (int i = 1; i <= consumeCount; i++) {
-                Message receivedMessage = messageConsumer.receive(1000);
+                Message receivedMessage = messageConsumer.receive(3000);
 
                 assertNotNull(receivedMessage);
                 assertTrue(receivedMessage instanceof TextMessage);
@@ -1185,7 +1315,7 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             // the Flow was in flight to the peer), and then DONT send a flow frame back to the client
             // as it can tell from the messages that all the credit has been used.
             testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"),
-                                                       messageCount, true, false, equalTo(UnsignedInteger.valueOf(messageCount)), 1);
+                                                       messageCount, true, false, equalTo(UnsignedInteger.valueOf(messageCount)), 1, false);
 
             // Expect an unsettled 'discharge' transfer to the txn coordinator containing the txnId,
             // and reply with accepted and settled disposition to indicate the rollback succeeded
@@ -1415,7 +1545,7 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
 
             //Expect the session close
             testPeer.expectEnd(false);
-            testPeer.sendTransferToLastOpenedLinkOnLastOpenedSession();
+            testPeer.sendTransferToLastOpenedLinkOnLastOpenedSession(null, null, null, null, new AmqpValueDescribedType("content"), 1);
             testPeer.remotelyDetachLastOpenedLinkOnLastOpenedSession(false, true);
             testPeer.remotelyEndLastOpenedSession(false, 200);
 
@@ -1441,13 +1571,90 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
         try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
             Connection connection = testFixture.establishConnecton(testPeer, options);
 
-            testPeer.expectBegin(equalTo(UnsignedInteger.valueOf(value)));
+            testPeer.expectBegin(equalTo(UnsignedInteger.valueOf(value)), true);
             Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
 
             assertNotNull("Session should not be null", session);
 
             testPeer.expectClose();
             connection.close();
+        }
+    }
+
+    @Test(timeout = 20000)
+    public void testAsyncDeliveryOrder() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            CoordinatorMatcher txCoordinatorMatcher = new CoordinatorMatcher();
+            testPeer.expectSenderAttach(txCoordinatorMatcher, false, false);
+
+            Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+
+            // Create a consumer, don't expect any flow as the connection is stopped
+            testPeer.expectReceiverAttach();
+
+            int messageCount = 10;
+            testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"),
+                    messageCount, false, false, equalTo(UnsignedInteger.valueOf(JmsPrefetchPolicy.DEFAULT_QUEUE_PREFETCH)), 1, true);
+
+            Queue queue = session.createQueue("myQueue");
+            MessageConsumer consumer = session.createConsumer(queue);
+
+            testPeer.waitForAllHandlersToComplete(3000);
+
+            // First expect an unsettled 'declare' transfer to the txn coordinator, and
+            // reply with a declared disposition state containing the txnId.
+            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
+            TransferPayloadCompositeMatcher declareMatcher = new TransferPayloadCompositeMatcher();
+            declareMatcher.setMessageContentMatcher(new EncodedAmqpValueMatcher(new Declare()));
+            testPeer.expectTransfer(declareMatcher, nullValue(), false, new Declared().setTxnId(txnId), true);
+
+            for (int i = 1; i <= messageCount; i++) {
+                // Then expect an *settled* TransactionalState disposition for each message once received by the consumer
+                TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
+                stateMatcher.withTxnId(equalTo(txnId));
+                stateMatcher.withOutcome(new AcceptedMatcher());
+
+                //TODO: could also match on delivery ID's
+                testPeer.expectDisposition(true, stateMatcher);
+            }
+
+            final CountDownLatch done = new CountDownLatch(messageCount);
+            final AtomicInteger index = new AtomicInteger(-1);
+
+            consumer.setMessageListener(new DeliveryOrderListener(done, index));
+
+            testPeer.waitForAllHandlersToComplete(3000);
+            assertTrue("Not all messages received in given time", done.await(10, TimeUnit.SECONDS));
+            assertEquals("Messages were not in expected order, final index was wrong", messageCount - 1, index.get());
+        }
+    }
+
+    private static class DeliveryOrderListener implements MessageListener {
+        private final CountDownLatch done;
+        private final AtomicInteger index;
+
+        private DeliveryOrderListener(CountDownLatch done, AtomicInteger index) {
+            this.done = done;
+            this.index = index;
+        }
+
+        @Override
+        public void onMessage(Message message) {
+            try {
+                int messageNumber = message.getIntProperty(TestAmqpPeer.MESSAGE_NUMBER);
+
+                LOG.info("Listener received message: {}", messageNumber);
+
+                index.compareAndSet(messageNumber - 1, messageNumber);
+
+                done.countDown();
+            } catch (Exception e) {
+                LOG.error("Caught exception in listener", e);
+            }
         }
     }
 }

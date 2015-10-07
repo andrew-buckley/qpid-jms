@@ -171,7 +171,6 @@ public class QpidJmsTestSupport {
             kaha.setDirectory(new File(KAHADB_DIRECTORY + "/" + name));
             brokerService.setPersistenceAdapter(kaha);
         }
-        brokerService.setStoreOpenWireVersion(10);
 
         configureBrokerPolicies(brokerService);
 
@@ -186,6 +185,8 @@ public class QpidJmsTestSupport {
             plugins.add(configureAuthentication());
         }
 
+        addAdditionalBrokerPlugins(plugins);
+
         if (!plugins.isEmpty()) {
             BrokerPlugin[] array = new BrokerPlugin[plugins.size()];
             brokerService.setPlugins(plugins.toArray(array));
@@ -194,6 +195,10 @@ public class QpidJmsTestSupport {
         addAdditionalConnectors(brokerService, portMap);
 
         return brokerService;
+    }
+
+    protected void addAdditionalBrokerPlugins(List<BrokerPlugin> plugins) {
+        // Subclasses can add their own plugins, we don't add any here.
     }
 
     protected void addAdditionalConnectors(BrokerService brokerService, Map<String, Integer> portMap) throws Exception {

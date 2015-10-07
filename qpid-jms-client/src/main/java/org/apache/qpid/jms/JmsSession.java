@@ -59,6 +59,7 @@ import javax.jms.TopicSubscriber;
 
 import org.apache.qpid.jms.message.JmsInboundMessageDispatch;
 import org.apache.qpid.jms.message.JmsMessage;
+import org.apache.qpid.jms.message.JmsMessageIDBuilder;
 import org.apache.qpid.jms.message.JmsMessageTransformation;
 import org.apache.qpid.jms.message.JmsOutboundMessageDispatch;
 import org.apache.qpid.jms.meta.JmsConsumerId;
@@ -93,8 +94,9 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
     private final LinkedBlockingQueue<JmsInboundMessageDispatch> stoppedMessages =
         new LinkedBlockingQueue<JmsInboundMessageDispatch>(10000);
     private JmsPrefetchPolicy prefetchPolicy;
+    private final JmsMessageIDBuilder messageIDBuilder;
     private final JmsSessionInfo sessionInfo;
-    private ExecutorService executor;
+    private volatile ExecutorService executor;
     private final ReentrantLock sendLock = new ReentrantLock();
 
     private final AtomicLong consumerIdGenerator = new AtomicLong();
@@ -107,6 +109,7 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
         this.connection = connection;
         this.acknowledgementMode = acknowledgementMode;
         this.prefetchPolicy = new JmsPrefetchPolicy(connection.getPrefetchPolicy());
+        this.messageIDBuilder = connection.getMessageIDBuilder();
 
         if (acknowledgementMode == SESSION_TRANSACTED) {
             setTransactionContext(new JmsLocalTransactionContext(this));
@@ -278,7 +281,7 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
 
         if (resource instanceof JmsConsumerInfo) {
             try {
-                JmsMessageConsumer consumer = consumers.get(((JmsConsumerInfo) resource).getConsumerId());
+                JmsMessageConsumer consumer = consumers.get(resource.getId());
                 if (consumer != null) {
                     consumer.shutdown(cause);
                 }
@@ -287,7 +290,7 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
             }
         } else if (resource instanceof JmsProducerInfo) {
             try {
-                JmsMessageProducer producer = producers.get(((JmsProducerInfo) resource).getProducerId());
+                JmsMessageProducer producer = producers.get(resource.getId());
                 if (producer != null) {
                     producer.shutdown(cause);
                 }
@@ -706,9 +709,9 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
                 original.setJMSExpiration(0);
             }
 
-            String msgId = getNextMessageId(producer);
+            Object msgId = messageIDBuilder.createMessageID(producer.getProducerId().toString(), producer.getNextMessageSequence());
             if (!disableMsgId) {
-                original.setJMSMessageID(msgId);
+                original.setJMSMessageID(msgId.toString());
             }
 
             boolean isJmsMessageType = original instanceof JmsMessage;
@@ -727,7 +730,7 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
 
             // We always set these on the copy, broker might require them even if client
             // has asked to not include them.
-            copy.setJMSMessageID(msgId);
+            copy.getFacade().setMessageId(msgId);
             copy.setJMSTimestamp(timeStamp);
 
             boolean sync = connection.isAlwaysSyncSend() ||
@@ -860,9 +863,11 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
             consumer.stop();
         }
 
-        if (executor != null) {
-            executor.shutdown();
-            executor = null;
+        synchronized (sessionInfo) {
+            if (executor != null) {
+                executor.shutdown();
+                executor = null;
+            }
         }
     }
 
@@ -875,19 +880,26 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
     }
 
     Executor getExecutor() {
-        if (executor == null) {
-            executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
-
-                @Override
-                public Thread newThread(Runnable runner) {
-                    Thread executor = new Thread(runner);
-                    executor.setName("JmsSession ["+ sessionInfo.getSessionId() + "] dispatcher");
-                    executor.setDaemon(true);
-                    return executor;
+        ExecutorService exec = executor;
+        if(exec == null) {
+            synchronized (sessionInfo) {
+                if (executor == null) {
+                    executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+                        @Override
+                        public Thread newThread(Runnable runner) {
+                            Thread executor = new Thread(runner);
+                            executor.setName("JmsSession ["+ sessionInfo.getId() + "] dispatcher");
+                            executor.setDaemon(true);
+                            return executor;
+                        }
+                    });
                 }
-            });
+
+                exec = executor;
+            }
         }
-        return executor;
+
+        return exec;
     }
 
     protected JmsSessionInfo getSessionInfo() {
@@ -895,27 +907,24 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
     }
 
     protected JmsSessionId getSessionId() {
-        return sessionInfo.getSessionId();
+        return sessionInfo.getId();
     }
 
     protected JmsConsumerId getNextConsumerId() {
-        return new JmsConsumerId(sessionInfo.getSessionId(), consumerIdGenerator.incrementAndGet());
+        return new JmsConsumerId(sessionInfo.getId(), consumerIdGenerator.incrementAndGet());
     }
 
     protected JmsProducerId getNextProducerId() {
-        return new JmsProducerId(sessionInfo.getSessionId(), producerIdGenerator.incrementAndGet());
+        return new JmsProducerId(sessionInfo.getId(), producerIdGenerator.incrementAndGet());
     }
 
     protected void setFailureCause(Exception failureCause) {
         this.failureCause = failureCause;
     }
 
-    private String getNextMessageId(JmsMessageProducer producer) {
-        return producer.getProducerId().toString() + "-" + producer.getNextMessageSequence();
-    }
-
     private <T extends JmsMessage> T init(T message) {
         message.setConnection(connection);
+        message.setValidatePropertyNames(connection.isValidatePropertyNames());
         return message;
     }
 
@@ -949,6 +958,8 @@ public class JmsSession implements Session, QueueSession, TopicSession, JmsMessa
 
     @Override
     public void onInboundMessage(JmsInboundMessageDispatch envelope) {
+        // TODO: is onInboundMessage ever called on the Session?
+        // Seems like we might only call it on consumers from within the connection.
         if (started.get()) {
             deliver(envelope);
         } else {

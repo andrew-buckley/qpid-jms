@@ -24,27 +24,28 @@ import org.apache.qpid.jms.message.JmsInboundMessageDispatch;
  */
 public abstract class AbstractMessageQueue implements MessageQueue {
 
-    protected boolean closed;
-    protected boolean running;
-    protected Object lock = new Object();
+    private volatile boolean closed;
+    private volatile boolean running;
+    private final Object lock = new Object();
 
     @Override
-    public JmsInboundMessageDispatch peek() {
+    public final JmsInboundMessageDispatch peek() {
         synchronized (lock) {
             return peekFirst();
         }
     }
 
     @Override
-    public JmsInboundMessageDispatch dequeue(long timeout) throws InterruptedException {
+    public final JmsInboundMessageDispatch dequeue(long timeout) throws InterruptedException {
         synchronized (lock) {
             // Wait until the consumer is ready to deliver messages.
-            while (timeout != 0 && !closed && (isEmpty() || !running)) {
+            while (timeout != 0 && !closed && isEmpty() && running) {
                 if (timeout == -1) {
                     lock.wait();
                 } else {
+                    long start = System.currentTimeMillis();
                     lock.wait(timeout);
-                    break;
+                    timeout = Math.max(timeout + start - System.currentTimeMillis(), 0);
                 }
             }
 
@@ -57,7 +58,7 @@ public abstract class AbstractMessageQueue implements MessageQueue {
     }
 
     @Override
-    public JmsInboundMessageDispatch dequeueNoWait() {
+    public final JmsInboundMessageDispatch dequeueNoWait() {
         synchronized (lock) {
             if (closed || !running || isEmpty()) {
                 return null;
@@ -67,15 +68,17 @@ public abstract class AbstractMessageQueue implements MessageQueue {
     }
 
     @Override
-    public void start() {
+    public final void start() {
         synchronized (lock) {
-            running = true;
+            if (!closed) {
+                running = true;
+            }
             lock.notifyAll();
         }
     }
 
     @Override
-    public void stop() {
+    public final void stop() {
         synchronized (lock) {
             running = false;
             lock.notifyAll();
@@ -83,28 +86,26 @@ public abstract class AbstractMessageQueue implements MessageQueue {
     }
 
     @Override
-    public boolean isRunning() {
+    public final boolean isRunning() {
         return running;
     }
 
     @Override
-    public void close() {
+    public final void close() {
         synchronized (lock) {
-            if (!closed) {
-                running = false;
-                closed = true;
-            }
+            running = false;
+            closed = true;
             lock.notifyAll();
         }
     }
 
     @Override
-    public boolean isClosed() {
+    public final boolean isClosed() {
         return closed;
     }
 
     @Override
-    public Object getLock() {
+    public final Object getLock() {
         return lock;
     }
 

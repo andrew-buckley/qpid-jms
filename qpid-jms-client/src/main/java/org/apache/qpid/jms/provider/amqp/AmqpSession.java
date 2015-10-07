@@ -18,6 +18,8 @@ package org.apache.qpid.jms.provider.amqp;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import javax.jms.IllegalStateException;
 
@@ -30,59 +32,25 @@ import org.apache.qpid.jms.meta.JmsSessionInfo;
 import org.apache.qpid.jms.meta.JmsTransactionId;
 import org.apache.qpid.jms.provider.AsyncResult;
 import org.apache.qpid.jms.provider.ProviderConstants;
+import org.apache.qpid.jms.provider.amqp.builders.AmqpConsumerBuilder;
+import org.apache.qpid.jms.provider.amqp.builders.AmqpProducerBuilder;
 import org.apache.qpid.proton.engine.Session;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
+public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> implements AmqpResourceParent {
 
     private static final Logger LOG = LoggerFactory.getLogger(AmqpSession.class);
 
     private final AmqpConnection connection;
-    private final AmqpTransactionContext txContext;
+    private AmqpTransactionContext txContext;
 
     private final Map<JmsConsumerId, AmqpConsumer> consumers = new HashMap<JmsConsumerId, AmqpConsumer>();
 
-    public AmqpSession(AmqpConnection connection, JmsSessionInfo info) {
-        super(info, connection.getProtonConnection().session());
+    public AmqpSession(AmqpConnection connection, JmsSessionInfo info, Session session) {
+        super(info, session, connection);
+
         this.connection = connection;
-
-        this.resource.getSessionId().setProviderHint(this);
-        if (this.resource.isTransacted()) {
-            txContext = new AmqpTransactionContext(this);
-        } else {
-            txContext = null;
-        }
-    }
-
-    @Override
-    public void opened() {
-        if (this.txContext != null) {
-            this.txContext.open(openRequest);
-        } else {
-            super.opened();
-        }
-    }
-
-    @Override
-    protected void doOpen() {
-        long outgoingWindow = getProvider().getSessionOutgoingWindow();
-
-        Session session = this.getEndpoint();
-        session.setIncomingCapacity(Integer.MAX_VALUE);
-        if(outgoingWindow >= 0) {
-            session.setOutgoingWindow(outgoingWindow);
-        }
-
-        this.connection.addSession(this);
-
-        super.doOpen();
-    }
-
-    @Override
-    protected void doClose() {
-        this.connection.removeSession(this);
-        super.doClose();
     }
 
     /**
@@ -109,24 +77,24 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
         }
     }
 
-    public AmqpProducer createProducer(JmsProducerInfo producerInfo) {
-        AmqpProducer producer = null;
-
-        if (producerInfo.getDestination() != null || connection.getProperties().isAnonymousRelaySupported()) {
-            LOG.debug("Creating AmqpFixedProducer for: {}", producerInfo.getDestination());
-            producer = new AmqpFixedProducer(this, producerInfo);
-        } else {
+    public void createProducer(JmsProducerInfo producerInfo, AsyncResult request) {
+        if (producerInfo.getDestination() == null && !getConnection().getProperties().isAnonymousRelaySupported()) {
             LOG.debug("Creating an AmqpAnonymousFallbackProducer");
-            producer = new AmqpAnonymousFallbackProducer(this, producerInfo);
+
+            AmqpProducer producer = new AmqpAnonymousFallbackProducer(this, producerInfo);
+            producer.setPresettle(getConnection().isPresettleProducers());
+
+            // No producer is created yet so this is always successful.
+            request.onSuccess();
+        } else {
+            LOG.debug("Creating AmqpFixedProducer for: {}", producerInfo.getDestination());
+            AmqpProducerBuilder builder = new AmqpProducerBuilder(this, producerInfo);
+            builder.buildResource(request);
         }
-
-        producer.setPresettle(connection.isPresettleProducers());
-
-        return producer;
     }
 
     public AmqpProducer getProducer(JmsProducerInfo producerInfo) {
-        return getProducer(producerInfo.getProducerId());
+        return getProducer(producerInfo.getId());
     }
 
     public AmqpProducer getProducer(JmsProducerId producerId) {
@@ -137,32 +105,24 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
         return null;
     }
 
-    public AmqpConsumer createConsumer(JmsConsumerInfo consumerInfo) {
-        AmqpConsumer result = null;
-
-        if (consumerInfo.isBrowser()) {
-            result = new AmqpQueueBrowser(this, consumerInfo);
-        } else {
-            result = new AmqpConsumer(this, consumerInfo);
-        }
-
-        result.setPresettle(connection.isPresettleConsumers());
-        return result;
+    public void createConsumer(JmsConsumerInfo consumerInfo, AsyncResult request) {
+        AmqpConsumerBuilder builder = new AmqpConsumerBuilder(this, consumerInfo);
+        builder.buildResource(request);
     }
 
     public AmqpConsumer getConsumer(JmsConsumerInfo consumerInfo) {
-        return getConsumer(consumerInfo.getConsumerId());
+        return getConsumer(consumerInfo.getId());
     }
 
     public AmqpConsumer getConsumer(JmsConsumerId consumerId) {
         if (consumerId.getProviderHint() instanceof AmqpConsumer) {
             return (AmqpConsumer) consumerId.getProviderHint();
         }
-        return this.consumers.get(consumerId);
+        return consumers.get(consumerId);
     }
 
     public AmqpTransactionContext getTransactionContext() {
-        return this.txContext;
+        return txContext;
     }
 
     /**
@@ -177,7 +137,7 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
      * @throws Exception if an error occurs while performing the operation.
      */
     public void begin(JmsTransactionId txId, AsyncResult request) throws Exception {
-        if (!this.resource.isTransacted()) {
+        if (!getResourceInfo().isTransacted()) {
             throw new IllegalStateException("Non-transacted Session cannot start a TX.");
         }
 
@@ -193,7 +153,7 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
      * @throws Exception if an error occurs while performing the operation.
      */
     public void commit(AsyncResult request) throws Exception {
-        if (!this.resource.isTransacted()) {
+        if (!getResourceInfo().isTransacted()) {
             throw new IllegalStateException("Non-transacted Session cannot start a TX.");
         }
 
@@ -209,19 +169,54 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
      * @throws Exception if an error occurs while performing the operation.
      */
     public void rollback(AsyncResult request) throws Exception {
-        if (!this.resource.isTransacted()) {
+        if (!getResourceInfo().isTransacted()) {
             throw new IllegalStateException("Non-transacted Session cannot start a TX.");
         }
 
         getTransactionContext().rollback(request);
     }
 
-    void addResource(AmqpConsumer consumer) {
-        consumers.put(consumer.getConsumerId(), consumer);
+    /**
+     * Allows a session resource to schedule a task for future execution.
+     *
+     * @param task
+     *      The Runnable task to be executed after the given delay.
+     * @param delay
+     *      The delay in milliseconds to schedule the given task for execution.
+     *
+     * @return a ScheduledFuture instance that can be used to cancel the task.
+     */
+    public ScheduledFuture<?> schedule(final Runnable task, long delay) {
+        if (task == null) {
+            LOG.trace("Resource attempted to schedule a null task.");
+            return null;
+        }
+
+        return getProvider().getScheduler().schedule(task, delay, TimeUnit.MILLISECONDS);
     }
 
-    void removeResource(AmqpConsumer consumer) {
-        consumers.remove(consumer.getConsumerId());
+    @Override
+    public void addChildResource(AmqpResource resource) {
+        // delegate to the connection if the type is not managed here.
+        if (resource instanceof AmqpConsumer) {
+            AmqpConsumer consumer = (AmqpConsumer) resource;
+            consumers.put(consumer.getConsumerId(), consumer);
+        } else if (resource instanceof AmqpTransactionContext) {
+            txContext = (AmqpTransactionContext) resource;
+        } else {
+            connection.addChildResource(resource);
+        }
+    }
+
+    @Override
+    public void removeChildResource(AmqpResource resource) {
+        // delegate to the connection if the type is not managed here.
+        if (resource instanceof AmqpConsumer) {
+            AmqpConsumer consumer = (AmqpConsumer) resource;
+            consumers.remove(consumer.getConsumerId());
+        } else {
+            connection.removeChildResource(resource);
+        }
     }
 
     /**
@@ -235,7 +230,7 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
      */
     public boolean containsSubscription(String subscriptionName) {
         for (AmqpConsumer consumer : consumers.values()) {
-            if (subscriptionName.equals(consumer.getJmsResource().getSubscriptionName())) {
+            if (subscriptionName.equals(consumer.getResourceInfo().getSubscriptionName())) {
                 return true;
             }
         }
@@ -255,27 +250,23 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> {
     }
 
     public AmqpProvider getProvider() {
-        return this.connection.getProvider();
+        return connection.getProvider();
     }
 
     public AmqpConnection getConnection() {
-        return this.connection;
+        return connection;
     }
 
     public JmsSessionId getSessionId() {
-        return this.resource.getSessionId();
-    }
-
-    public Session getProtonSession() {
-        return this.getEndpoint();
+        return getResourceInfo().getId();
     }
 
     boolean isTransacted() {
-        return this.resource.isTransacted();
+        return getResourceInfo().isTransacted();
     }
 
     boolean isAsyncAck() {
-        return this.resource.isSendAcksAsync() || isTransacted();
+        return getResourceInfo().isSendAcksAsync() || isTransacted();
     }
 
     @Override

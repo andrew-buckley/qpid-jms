@@ -20,7 +20,7 @@
   <parent>
     <groupId>org.apache.qpid</groupId>
     <artifactId>qpid-jms-interop-tests</artifactId>
-    <version>0.4.0-SNAPSHOT</version>
+    <version>0.6.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>qpid-jms-activemq-tests</artifactId>
@@ -111,15 +111,6 @@
 
   <build>
     <plugins>
-      <plugin>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <configuration>
-          <excludes>
-            <!-- Need 5.12 snapshot -->
-            <exclude>**/JoramSelectorTest.java</exclude>
-          </excludes>
-        </configuration>
-      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-deploy-plugin</artifactId>
