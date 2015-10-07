@@ -25,8 +25,8 @@
 
   <artifactId>qpid-jms-client</artifactId>
   <packaging>jar</packaging>
-  <name>QpidJMS Client with AMQP acknowledgement</name>
-  <description>The core JMS Client implementation with support for AMQP-style acknowledgement.</description>
+  <name>QpidJMS Client</name>
+  <description>The core JMS Client implementation</description>
 
   <dependencies>
     <!-- =================================== -->
