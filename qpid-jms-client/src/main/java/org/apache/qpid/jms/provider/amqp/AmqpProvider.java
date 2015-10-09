@@ -119,7 +119,7 @@ public class AmqpProvider implements Provider, TransportListener , AmqpResourceP
     private long requestTimeout = JmsConnectionInfo.DEFAULT_REQUEST_TIMEOUT;
     private long sendTimeout = JmsConnectionInfo.DEFAULT_SEND_TIMEOUT;
     private int channelMax = DEFAULT_CHANNEL_MAX;
-    private int idleTimeout = 120000;
+    private int idleTimeout = 240000;
     private long sessionOutoingWindow = -1; //Use proton default
     private int maxFrameSize = DEFAULT_MAX_FRAME_SIZE;
 

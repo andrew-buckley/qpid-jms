@@ -155,13 +155,17 @@ public class AmqpDestinationHelper {
         String address = getDestinationAddress(destination, message.getConnection());
         byte typeValue = toTypeAnnotation(destination);
 
-        message.setToAddress(address);
+        String currentAddress = message.getToAddress();
+        if (currentAddress == null)
+        {
+            message.setToAddress(address);
 
-        // Set or clear the new byte type annotation as appropriate
-        if (address == null || typeValue == UNKNOWN_TYPE) {
-            message.removeMessageAnnotation(JMS_DEST_TYPE_MSG_ANNOTATION_SYMBOL_NAME);
-        } else {
-            message.setMessageAnnotation(JMS_DEST_TYPE_MSG_ANNOTATION_SYMBOL_NAME, typeValue);
+            // Set or clear the new byte type annotation as appropriate
+            if (address == null || typeValue == UNKNOWN_TYPE) {
+                message.removeMessageAnnotation(JMS_DEST_TYPE_MSG_ANNOTATION_SYMBOL_NAME);
+            } else {
+                message.setMessageAnnotation(JMS_DEST_TYPE_MSG_ANNOTATION_SYMBOL_NAME, typeValue);
+                }
         }
 
         // Always clear the legacy string type annotation
